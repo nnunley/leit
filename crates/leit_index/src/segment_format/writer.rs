@@ -934,6 +934,144 @@ mod tests {
         )
     }
 
+    /// Build an index with TWO multi-block terms whose document ranges are disjoint, so the
+    /// block summaries can prove that doc ranges are derived per term and never chained across a
+    /// term boundary. "alpha" covers docs 0..150 (two blocks); "beta" covers docs 1000..1130 (two
+    /// blocks). If the implicit lower-bound rule wrongly continued from the previous term's last
+    /// block, beta's first block would read as a continuation of alpha's range instead of its own.
+    fn make_two_multiblock_index() -> InMemoryIndex {
+        let field_id = FieldId::new(1);
+        let mut documents = BTreeSet::new();
+        for doc_id in 0..150 {
+            documents.insert(doc_id);
+        }
+        for doc_id in 1000..1130 {
+            documents.insert(doc_id);
+        }
+
+        let mut field_names = BTreeMap::new();
+        field_names.insert(String::from("text"), field_id);
+
+        let mut field_stats = BTreeMap::new();
+        field_stats.insert(
+            field_id,
+            FieldMetadata {
+                field_id,
+                doc_count: 280,
+                total_terms: 2,
+            },
+        );
+
+        let mut terms_to_ids = BTreeMap::new();
+        terms_to_ids.insert((field_id, String::from("alpha")), leit_core::TermId::new(0));
+        terms_to_ids.insert((field_id, String::from("beta")), leit_core::TermId::new(1));
+
+        let term_entries = vec![
+            TermEntry {
+                field_id,
+                term_id: leit_core::TermId::new(0),
+                term: String::from("alpha"),
+            },
+            TermEntry {
+                field_id,
+                term_id: leit_core::TermId::new(1),
+                term: String::from("beta"),
+            },
+        ];
+
+        let mut postings = BTreeMap::new();
+        let mut alpha = vec![];
+        for doc_id in 0..150 {
+            alpha.push(PostingEntry {
+                doc_id,
+                term_freq: 1,
+            });
+        }
+        postings.insert(leit_core::TermId::new(0), alpha);
+        let mut beta = vec![];
+        for doc_id in 1000..1130 {
+            beta.push(PostingEntry {
+                doc_id,
+                term_freq: 1,
+            });
+        }
+        postings.insert(leit_core::TermId::new(1), beta);
+
+        let mut posting_blocks = BTreeMap::new();
+        posting_blocks.insert(leit_core::TermId::new(0), vec![]);
+        posting_blocks.insert(leit_core::TermId::new(1), vec![]);
+
+        InMemoryIndex::new(
+            FieldAnalyzers::default(),
+            documents,
+            terms_to_ids,
+            term_entries,
+            postings,
+            posting_blocks,
+            field_stats,
+            field_names,
+            BTreeMap::new(),
+        )
+    }
+
+    /// Block doc ranges are scoped per term: each term's block `end_doc` values come from that
+    /// term's own postings, never derived by continuing from the previous term's last block.
+    #[test]
+    fn block_meta_doc_ranges_are_per_term() {
+        let block_size = u32::try_from(BLOCK_DOC_COUNT).expect("block size fits u32");
+        let index = make_two_multiblock_index();
+        let segment = write_segment(&index).expect("write_segment should succeed");
+        let header = SegmentHeader::read(&segment).expect("header should decode");
+
+        let postings_table = PostingsTableReader::new(
+            &segment,
+            header.postings_table_offset,
+            header.postings_data_offset,
+        )
+        .expect("postings table");
+        let block_meta = BlockMetadataReader::new(
+            &segment,
+            header.block_meta_offset,
+            header.stored_fields_offset,
+        )
+        .expect("block meta");
+
+        // Entry order follows term_entries: 0 = "alpha" (docs 0..150), 1 = "beta" (docs 1000..1130).
+        let (_, _, alpha_freq, _, alpha_first_block, alpha_blocks) =
+            postings_table.entry(0).expect("alpha entry");
+        let (_, _, beta_freq, _, beta_first_block, beta_blocks) =
+            postings_table.entry(1).expect("beta entry");
+
+        assert_eq!(alpha_freq, 150);
+        assert_eq!(beta_freq, 130);
+        // Each term spans two blocks; beta's blocks sit contiguously after alpha's in the table.
+        assert_eq!(alpha_blocks, 2);
+        assert_eq!(beta_blocks, 2);
+        assert_eq!(beta_first_block, alpha_first_block + alpha_blocks);
+
+        // alpha block ends: doc 127 (first full block), then doc 149 (its last document).
+        let (alpha_b0_end, _, _) = block_meta.entry(alpha_first_block).expect("alpha block 0");
+        let (alpha_b1_end, _, _) = block_meta
+            .entry(alpha_first_block + 1)
+            .expect("alpha block 1");
+        assert_eq!(alpha_b0_end, block_size - 1); // 127
+        assert_eq!(alpha_b1_end, 149);
+
+        // beta block ends come from beta's own high doc-id range, NOT a continuation of alpha's.
+        let (beta_b0_end, _, _) = block_meta.entry(beta_first_block).expect("beta block 0");
+        let (beta_b1_end, _, _) = block_meta
+            .entry(beta_first_block + 1)
+            .expect("beta block 1");
+        assert_eq!(beta_b0_end, 1000 + block_size - 1); // 1127
+        assert_eq!(beta_b1_end, 1129);
+        // The cross-term boundary must NOT chain: beta's first block does not continue alpha's last.
+        assert_ne!(
+            beta_b0_end,
+            alpha_b1_end + 1,
+            "beta's first block must derive from beta's postings, not alpha's last block"
+        );
+    }
+
     /// Test T3 obligation: multi-block round-trip with block metadata verification.
     /// Build an index with a term having > `BLOCK_DOC_COUNT` postings, write the segment,
     /// and verify block summaries (`end_doc`, `max_term_freq`, `decode_offset`) are correct.
