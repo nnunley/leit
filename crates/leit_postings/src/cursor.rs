@@ -53,8 +53,8 @@
 //!   today; richer per-block max-score / block-summary slots can be added behind `BlockCursor`
 //!   for Block-Max WAND (Phase 3) without changing `DocCursor`/`TfCursor` callers.
 //! - **Borrowed view** — `PostingsView` is a borrowed window over codec bytes plus a
-//!   cursor-layer summary slice; the segment block-metadata sidecar lowers into that slice in
-//!   ITER-0005 (see `BlockSummary`'s `TODO(ITER-0005)`) with no cursor-API change.
+//!   cursor-layer summary slice; the segment block-metadata sidecar lowers into that slice with
+//!   no cursor-API change (the lowering drops the segment-specific decode offset).
 
 use alloc::vec::Vec;
 
@@ -154,12 +154,11 @@ impl Default for DecodeScratch {
 ///
 /// A cursor-layer abstraction of block metadata. Each block carries a document range
 /// and a term-frequency upper bound, exposed via `BlockCursor` for Phase 3 pruning.
-/// Phase 3 WAND will consume this data without format changes (DEC-04, DEC-06).
+/// Phase 3 WAND will consume this data without format changes.
 ///
-/// # TODO (ITER-0005)
-///
-/// The segment block-metadata sidecar (a separate block-summaries table in the segment
-/// format) lowers into these cursor-layer summaries. See ITER-0005 STORY-0086.
+/// Segment block-metadata sidecar entries lower into these cursor-layer summaries,
+/// dropping the segment-specific decode offset. The lowering is implemented via
+/// `impl From<BlockMetadataEntry> for BlockSummary` in the index layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockSummary {
     /// Inclusive end document ID for this block.
