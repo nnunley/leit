@@ -15,6 +15,9 @@
 //! - `PostingsTableReader`: `postings_data_offset` (`u64`) + `postings_data_len` (`u32`) + `doc_freq` (`u32`)
 //!   + `reserved_codec_id` (`u32`), 20 bytes/entry
 //! - `PostingsDataReader`: borrowed postings payload bytes; ranges from `PostingsTableReader` offsets
+//! - `BlockMetadataReader`: per-block summaries (`end_doc`: `u32` + `max_term_freq`: `u32` +
+//!   `decode_offset`: `u32`, 12 bytes/entry); decoded via alignment-free little-endian reads so the
+//!   section may start at any buffer offset
 //!
 //! All readers validate bounds against the segment buffer and return `SegmentError` on out-of-bounds
 //! access (never panic).
@@ -647,15 +650,18 @@ impl<'a> PostingsDataReader<'a> {
     }
 }
 
-/// Block metadata reader: reserved (currently zero-length, content deferred).
+/// Block metadata reader: per-block summary entries with alignment-free zero-copy access.
 ///
 /// **Bounds:** `block_meta_offset .. stored_fields_offset`
 ///
-/// This section is reserved but currently zero-length. Iterating readers are deferred for a future release.
-#[expect(
-    dead_code,
-    reason = "reserved for future releases; placeholder in current format, used by SegmentView"
-)]
+/// **Layout (12 bytes per entry):**
+/// - Entries are contiguous `BlockMetadataEntry` structures (`end_doc`: `u32` + `max_term_freq`: `u32` + `decode_offset`: `u32`)
+/// - No count prefix; entry count is derived from section length / 12.
+/// - Section length must be a multiple of 12 bytes.
+///
+/// **Alignment-free access:** Each entry is decoded via manual little-endian reads of three u32 fields
+/// (see `BlockMetadataEntry::from_le_bytes`), not bytemuck casts. This ensures correct behavior regardless
+/// of the buffer's base alignment or the section's byte offset within the buffer.
 #[expect(
     unreachable_pub,
     reason = "pub(crate) for SegmentView visibility in current implementation"
@@ -665,6 +671,7 @@ pub struct BlockMetadataReader<'a> {
     buffer: &'a [u8],
     section_start: u64,
     section_end: u64,
+    entry_count: u32,
 }
 
 impl<'a> BlockMetadataReader<'a> {
@@ -676,7 +683,7 @@ impl<'a> BlockMetadataReader<'a> {
     /// * `stored_fields_offset` - offset to next section (end of block metadata)
     ///
     /// # Returns
-    /// `BlockMetadataReader` or `SegmentError` if out of bounds.
+    /// `BlockMetadataReader` or `SegmentError` if section length is not a multiple of 12, or out of bounds.
     ///
     /// In the current format, this section is typically zero-length; the reader is reserved for future releases.
     pub fn new(
@@ -694,21 +701,97 @@ impl<'a> BlockMetadataReader<'a> {
             });
         }
 
+        // Section length must be a multiple of 12 (each entry is 12 bytes)
+        let section_len =
+            stored_fields_offset
+                .checked_sub(block_meta_offset)
+                .ok_or(SegmentError::BadOffset {
+                    offset: stored_fields_offset,
+                    limit: block_meta_offset,
+                })?;
+
+        if section_len % 12 != 0 {
+            return Err(SegmentError::BadOffset {
+                offset: section_len,
+                limit: 12,
+            });
+        }
+
+        let entry_count = u32::try_from(section_len / 12).map_err(|_| SegmentError::BadOffset {
+            offset: section_len,
+            limit: u32::MAX as u64,
+        })?;
+
         Ok(Self {
             buffer,
             section_start: block_meta_offset,
             section_end: stored_fields_offset,
+            entry_count,
         })
     }
 
-    /// True if the block metadata section is empty (zero-length, reserved).
-    pub fn is_empty(&self) -> bool {
-        self.section_start == self.section_end
+    /// Number of block metadata entries in this section.
+    pub fn len(&self) -> u32 {
+        self.entry_count
     }
 
-    /// Byte length of the block metadata section.
-    pub fn len(&self) -> u64 {
-        self.section_end - self.section_start
+    /// True if the block metadata section is empty (zero-length).
+    pub fn is_empty(&self) -> bool {
+        self.entry_count == 0
+    }
+
+    /// Get block metadata entry [i]: (`end_doc`, `max_term_freq`, `decode_offset`).
+    ///
+    /// # Arguments
+    /// * `i` - entry index (`0..len()`)
+    ///
+    /// # Returns
+    /// (`end_doc`: u32, `max_term_freq`: u32, `decode_offset`: u32) or `SegmentError` if out of bounds.
+    ///
+    /// Each entry is decoded via manual little-endian byte reads (alignment-free access).
+    pub fn entry(&self, i: u32) -> Result<(u32, u32, u32), SegmentError> {
+        if i >= self.entry_count {
+            return Err(SegmentError::BadOffset {
+                offset: i as u64,
+                limit: self.entry_count as u64,
+            });
+        }
+
+        // Entry offset: i * 12 bytes from section start
+        let i_u64 = i as u64;
+        let entry_offset = i_u64.checked_mul(12).ok_or(SegmentError::BadOffset {
+            offset: i_u64,
+            limit: u64::MAX,
+        })?;
+        let absolute_offset =
+            self.section_start
+                .checked_add(entry_offset)
+                .ok_or(SegmentError::BadOffset {
+                    offset: entry_offset,
+                    limit: self.section_end,
+                })?;
+
+        // Bounds check: entry is 12 bytes
+        let absolute_offset_plus_12 =
+            absolute_offset
+                .checked_add(12)
+                .ok_or(SegmentError::BadOffset {
+                    offset: absolute_offset,
+                    limit: self.section_end,
+                })?;
+        if absolute_offset_plus_12 > self.section_end {
+            return Err(SegmentError::BadOffset {
+                offset: absolute_offset,
+                limit: self.section_end,
+            });
+        }
+
+        let offset_usize = usize::try_from(absolute_offset).unwrap_or(usize::MAX);
+        let end_doc = read_u32_le(self.buffer, offset_usize)?;
+        let max_term_freq = read_u32_le(self.buffer, offset_usize + 4)?;
+        let decode_offset = read_u32_le(self.buffer, offset_usize + 8)?;
+
+        Ok((end_doc, max_term_freq, decode_offset))
     }
 }
 
@@ -913,6 +996,196 @@ mod tests {
             .expect("should create reader");
         assert!(reader.is_empty());
         assert_eq!(reader.len(), 0);
+    }
+
+    #[test]
+    fn test_block_metadata_reader_single_entry() {
+        // Block metadata with 1 entry: 12 bytes (end_doc=127, max_term_freq=42, decode_offset=1024)
+        let mut block_meta = vec![];
+        block_meta.extend_from_slice(&127_u32.to_le_bytes()); // end_doc
+        block_meta.extend_from_slice(&42_u32.to_le_bytes()); // max_term_freq
+        block_meta.extend_from_slice(&1024_u32.to_le_bytes()); // decode_offset
+
+        let buffer = make_test_segment(vec![], vec![], vec![], vec![]);
+        let mut full_buffer = buffer;
+        let block_meta_offset = full_buffer.len() as u64;
+        full_buffer.extend_from_slice(&block_meta);
+        let stored_fields_offset = full_buffer.len() as u64;
+
+        let reader =
+            BlockMetadataReader::new(&full_buffer, block_meta_offset, stored_fields_offset)
+                .expect("should create reader");
+        assert_eq!(reader.len(), 1);
+        assert!(!reader.is_empty());
+
+        let (end_doc, max_term_freq, decode_offset) = reader.entry(0).expect("entry should exist");
+        assert_eq!(end_doc, 127);
+        assert_eq!(max_term_freq, 42);
+        assert_eq!(decode_offset, 1024);
+    }
+
+    #[test]
+    fn test_block_metadata_reader_multiple_entries() {
+        // Multiple block metadata entries
+        let mut block_meta = vec![];
+        for (end_doc, max_freq, offset) in
+            &[(100_u32, 50_u32, 0_u32), (200, 30, 500), (300, 10, 1024)]
+        {
+            block_meta.extend_from_slice(&end_doc.to_le_bytes());
+            block_meta.extend_from_slice(&max_freq.to_le_bytes());
+            block_meta.extend_from_slice(&offset.to_le_bytes());
+        }
+
+        let buffer = make_test_segment(vec![], vec![], vec![], vec![]);
+        let mut full_buffer = buffer;
+        let block_meta_offset = full_buffer.len() as u64;
+        full_buffer.extend_from_slice(&block_meta);
+        let stored_fields_offset = full_buffer.len() as u64;
+
+        let reader =
+            BlockMetadataReader::new(&full_buffer, block_meta_offset, stored_fields_offset)
+                .expect("should create reader");
+        assert_eq!(reader.len(), 3);
+
+        let (e0_doc, e0_freq, e0_offset) = reader.entry(0).expect("entry 0");
+        assert_eq!(e0_doc, 100);
+        assert_eq!(e0_freq, 50);
+        assert_eq!(e0_offset, 0);
+
+        let (e1_doc, e1_freq, e1_offset) = reader.entry(1).expect("entry 1");
+        assert_eq!(e1_doc, 200);
+        assert_eq!(e1_freq, 30);
+        assert_eq!(e1_offset, 500);
+
+        let (e2_doc, e2_freq, e2_offset) = reader.entry(2).expect("entry 2");
+        assert_eq!(e2_doc, 300);
+        assert_eq!(e2_freq, 10);
+        assert_eq!(e2_offset, 1024);
+    }
+
+    #[test]
+    fn test_block_metadata_reader_unaligned_offset() {
+        // CRITICAL REGRESSION TEST: Block metadata section at a non-4-aligned offset.
+        // This test MUST FAIL if trying to use bytemuck::try_cast_slice (alignment required),
+        // and MUST PASS with manual little-endian reads (alignment-free).
+        //
+        // Build a buffer where the block_meta section starts at offset 81 (≡ 1 mod 4),
+        // not 4-aligned. The entries are valid, but a cast_slice approach would reject them.
+
+        let mut buffer = vec![0_u8; 100]; // 100 bytes, start at offset 0 (aligned)
+
+        // Write block metadata entries at offset 81 (1 mod 4, NOT 4-aligned)
+        let block_meta_start = 81_usize;
+        buffer[block_meta_start..block_meta_start + 4].copy_from_slice(&127_u32.to_le_bytes());
+        buffer[block_meta_start + 4..block_meta_start + 8].copy_from_slice(&42_u32.to_le_bytes());
+        buffer[block_meta_start + 8..block_meta_start + 12]
+            .copy_from_slice(&1024_u32.to_le_bytes());
+
+        let block_meta_offset = 81_u64;
+        let stored_fields_offset = 81_u64 + 12;
+
+        // This MUST succeed with manual reads, regardless of alignment.
+        let reader = BlockMetadataReader::new(&buffer, block_meta_offset, stored_fields_offset)
+            .expect("reader should be created even at non-aligned offset");
+        assert_eq!(reader.len(), 1);
+
+        // Reading the entry MUST work and return correct values
+        let (end_doc, max_term_freq, decode_offset) = reader
+            .entry(0)
+            .expect("entry(0) must succeed despite non-4-aligned section");
+        assert_eq!(end_doc, 127, "end_doc must be decoded correctly");
+        assert_eq!(max_term_freq, 42, "max_term_freq must be decoded correctly");
+        assert_eq!(
+            decode_offset, 1024,
+            "decode_offset must be decoded correctly"
+        );
+    }
+
+    #[test]
+    fn test_block_metadata_reader_structural_proof_no_postings_access() {
+        // Reading block summaries must not touch the postings payload. Lay the postings region
+        // before the block-metadata section and fill it with a 0xFF sentinel; if the reader ever
+        // strayed into it, the decoded fields would be 0xFFFF_FFFF instead of the written values.
+        let mut buffer = vec![0_u8; 44];
+        buffer[0..20].fill(0xFF); // postings region sentinel
+        let block_meta_start = 20_usize; // 4-aligned, isolated from the sentinel region
+        buffer[block_meta_start..block_meta_start + 4].copy_from_slice(&127_u32.to_le_bytes());
+        buffer[block_meta_start + 4..block_meta_start + 8].copy_from_slice(&30_u32.to_le_bytes());
+        buffer[block_meta_start + 8..block_meta_start + 12].copy_from_slice(&64_u32.to_le_bytes());
+
+        let reader = BlockMetadataReader::new(&buffer, 20, 32).expect("reader constructs");
+        assert_eq!(reader.len(), 1);
+        let (end_doc, max_term_freq, decode_offset) = reader.entry(0).expect("entry decodes");
+        assert_eq!((end_doc, max_term_freq, decode_offset), (127, 30, 64));
+        assert_ne!(
+            end_doc, 0xFFFF_FFFF,
+            "must not have read the postings sentinel"
+        );
+    }
+
+    #[test]
+    fn test_block_metadata_reader_truncated_buffer_is_graceful() {
+        // The declared section extends past the end of the buffer (a truncated segment). The reader
+        // must surface a structured error at read time, never panic.
+        let buffer = vec![0_u8; 85];
+        // Section [80, 92) claims one 12-byte entry, but the buffer only holds 85 bytes.
+        let reader = BlockMetadataReader::new(&buffer, 80, 92).expect("construction is permissive");
+        assert_eq!(reader.len(), 1);
+        assert!(
+            matches!(reader.entry(0), Err(SegmentError::Truncated { .. })),
+            "reading past the buffer end must yield Truncated, not a panic"
+        );
+    }
+
+    #[test]
+    fn test_block_metadata_reader_bad_offset_start_is_graceful() {
+        // A block-meta offset beyond the buffer is rejected cleanly at construction.
+        let buffer = vec![0_u8; 50];
+        assert!(
+            matches!(
+                BlockMetadataReader::new(&buffer, 100, 112),
+                Err(SegmentError::BadOffset { .. })
+            ),
+            "an out-of-range section offset must be rejected, not panic"
+        );
+    }
+
+    #[test]
+    fn test_block_metadata_reader_invalid_section_length() {
+        // Section length not a multiple of 12 should fail
+        let buffer = make_test_segment(vec![], vec![], vec![], vec![]);
+        let block_meta_offset = 80_u64;
+        let stored_fields_offset = 80_u64 + 10; // 10 bytes, not a multiple of 12
+
+        let result = BlockMetadataReader::new(&buffer, block_meta_offset, stored_fields_offset);
+        assert!(
+            matches!(result, Err(SegmentError::BadOffset { .. })),
+            "reader should reject section length that is not a multiple of 12"
+        );
+    }
+
+    #[test]
+    fn test_block_metadata_reader_out_of_bounds_entry() {
+        let mut block_meta = vec![];
+        block_meta.extend_from_slice(&127_u32.to_le_bytes());
+        block_meta.extend_from_slice(&42_u32.to_le_bytes());
+        block_meta.extend_from_slice(&1024_u32.to_le_bytes());
+
+        let buffer = make_test_segment(vec![], vec![], vec![], vec![]);
+        let mut full_buffer = buffer;
+        let block_meta_offset = full_buffer.len() as u64;
+        full_buffer.extend_from_slice(&block_meta);
+        let stored_fields_offset = full_buffer.len() as u64;
+
+        let reader =
+            BlockMetadataReader::new(&full_buffer, block_meta_offset, stored_fields_offset)
+                .expect("should create reader");
+
+        let result = reader.entry(1); // only entry 0 exists
+        assert!(
+            matches!(result, Err(SegmentError::BadOffset { .. })),
+            "entry(1) should fail when only 1 entry exists"
+        );
     }
 
     #[test]
