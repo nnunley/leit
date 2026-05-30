@@ -401,3 +401,33 @@ direction; orphan rule satisfied — `leit_index` owns the cursor type, `leit_po
 
 **Evidence:** non-regression = all existing leit_index + integration tests stay green; ranking equivalence
 = SCENARIO-0026 (in-memory vs DeltaVarint vs BlockDelta cursor sources yield bit-identical top-k).
+
+## DEC-16 — Phase 1 segment format: REPLACE, not evolve/coexist (ITER-0004) — RESOLVED
+
+**Decision:** The DEC-05 fixed-header v1 segment format **replaces** the pre-existing Phase 1
+directory-based segment format (`crates/leit_index/src/segment.rs`: `SegmentView`/`SectionKind`
+directory, u16 version, u32 offsets; writer `codec.rs::encode_segment` + `InMemoryIndex::to_segment_bytes`).
+No dual-path reader, no parallel v1/v2 coexistence. The Phase 1 round-trip tests
+(`crates/leit_index/tests/segment_roundtrip.rs`, the segment portion of
+`crates/leit_integration_tests/tests/phase1_readiness.rs`) are migrated to assert against the new format.
+
+**Rationale:** leit is pre-1.0 with no production segments in existence — the Phase 1 format is a
+test-only serialization of the in-memory index, never persisted by any consumer. A dual-path or
+coexist strategy would add a second reader implementation, version-dispatch logic, and migration
+tooling to preserve compatibility with data that does not exist (KISS/YAGNI). The handover specifies a
+single clean versioned format with clean rejection of unknown versions, which `version: u32` + structured
+`SegmentError::UnsupportedVersion` already deliver. If real persisted segments ever predate this change,
+the correct recovery is an index rebuild, not a compatibility shim.
+
+**Surfaced by:** ITER-0004 PAR scope review (both reviewers flagged the undefined Phase 1 relationship as
+CRITICAL). Reviewer A leaned EVOLVE, Reviewer B leaned REPLACE; the orchestrator chose REPLACE on the
+no-production-data + pre-1.0 grounds above and the absence of any compatibility obligation in the spec.
+
+**Boxing-in:** None for downstream iterations. The replacement header is the complete DEC-05 layout
+(block_meta/stored_fields/columnar/footer offsets all reserved and written now, pointing at empty
+sections in v1-core), so ITER-0005 (block-meta content, mmap) and Phase 3 (columnar, stored fields)
+fill reserved slots without a header rewrite.
+
+**Verification:** ITER-0004 SCENARIO-0044 (write→read round-trip on the new format) + SCENARIO-0045
+(unknown-version clean rejection); the migrated Phase 1 tests stay green against the new format; the
+old directory-based code path is removed (no dead `SectionKind` directory reader remains).
