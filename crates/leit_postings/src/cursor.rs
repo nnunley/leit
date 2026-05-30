@@ -912,4 +912,50 @@ mod tests {
         // Decoding 50 docs into a 64-capacity scratch must not have reallocated.
         assert_eq!(scratch.docs.capacity(), 64);
     }
+
+    // SCENARIO-0010 (STORY-0005 AC-3): Partial postings retrieval only decodes the
+    // block(s) containing the relevant data, not the whole list.
+    //
+    // The selective-decode primitive is `BlockDecoder::decode_block`: retrieving the
+    // block that would contain a target doc decodes only that block's postings, never
+    // the entire list. (`CompressedCursor` decodes eagerly on construction; lazy
+    // cursor-driven skip-during-decode is Phase 3 per STORY-0024 AC-2 / DEC-14.)
+    #[test]
+    fn partial_retrieval_decodes_only_relevant_block() {
+        // 257 postings → three BlockDelta blocks (128 + 128 + 1). doc i -> id i*2.
+        let total = 257_u32;
+        let postings: Vec<(SegmentLocalDocId, TermFreq)> = (0..total)
+            .map(|i| (SegmentLocalDocId::new(i * 2), TermFreq::new(i + 1)))
+            .collect();
+        let encoded = BlockDeltaCodec.encode(&postings);
+
+        // A reader seeking to a doc that lives in the MIDDLE block (block 1, postings
+        // 128..256, i.e. doc ids 256..510) decodes only that block.
+        let target_doc = 300_u32; // 300 is even and in [256, 510): block 1.
+        let block_id = (target_doc / 2) as usize / 128; // position / BLOCK_DOC_COUNT
+        assert_eq!(block_id, 1, "target doc must fall in the middle block");
+
+        let mut docs = Vec::new();
+        let mut tfs = Vec::new();
+        let decoded = BlockDeltaCodec
+            .decode_block(&encoded, block_id, &mut docs, &mut tfs)
+            .expect("middle block decodes");
+
+        // Only the middle block's postings were decoded — strictly fewer than the
+        // full list, and none of block 0's docs are present.
+        assert_eq!(decoded, 128);
+        assert!(
+            decoded < total as usize,
+            "partial retrieval must decode fewer than the full list"
+        );
+        // Block 1 covers positions 128..256 → doc ids 256..510. The target is included;
+        // block 0's docs (ids 0..256) are NOT in the decoded buffer.
+        assert_eq!(docs.first().map(|d| d.get()), Some(256));
+        assert_eq!(docs.last().map(|d| d.get()), Some(255 * 2));
+        assert!(docs.iter().any(|d| d.get() == target_doc));
+        assert!(
+            docs.iter().all(|d| d.get() >= 256),
+            "no doc from earlier blocks should be decoded"
+        );
+    }
 }
