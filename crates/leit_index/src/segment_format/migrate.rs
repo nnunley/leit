@@ -9,11 +9,10 @@
 //!
 //! **Supported versions:** v1 only (current format).
 //!
-//! **Migration policy (DEC-20):** The v1 segment format is supported unbounded with no
-//! planned sunset. The migration framework establishes the dispatch mechanism for future
-//! versions: when a v2 is introduced, this module will support reading a sliding window
-//! of versions (e.g., v1-current) and provide a version-specific rewrite handler. The
-//! policy will be documented in DEC-20 in `docs/2026-05-30-phase2-architectural-decisions.md`.
+//! **Migration policy:** The v1 segment format is supported unbounded with no planned sunset.
+//! The migration framework establishes the dispatch mechanism for future versions: when a v2 is
+//! introduced, this module supports reading a sliding window of versions (e.g. the current version
+//! and its predecessor) and provides a version-specific rewrite handler for each older version.
 
 use alloc::borrow::Cow;
 use core::fmt;
