@@ -50,6 +50,9 @@ proptest = { version = "1.0" }
 # Hashing
 rapidhash = { version = "4.4" }
 
+# Zero-copy serialization for segment-resident types (no_std)
+bytemuck = { default-features = false, features = ["derive"], version = "1" }
+
 # Math
 core_maths = { default-features = false, version = "0.1" }
 

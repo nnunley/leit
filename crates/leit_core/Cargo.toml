@@ -15,6 +15,9 @@ categories.workspace = true
 default = ["std"]
 std = []
 
+[dependencies]
+bytemuck = { workspace = true }
+
 [dev-dependencies]
 proptest = { workspace = true }
 
