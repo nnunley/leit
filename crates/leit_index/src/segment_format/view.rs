@@ -34,13 +34,6 @@ pub struct SegmentView<'a> {
     header: SegmentHeader,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "crate-internal section accessors are unused in the lib build until segment queries are wired"
-    )
-)]
 impl<'a> SegmentView<'a> {
     /// Open a segment using the default (Structural) validation mode.
     ///
@@ -111,7 +104,10 @@ impl<'a> SegmentView<'a> {
     ///
     /// Constructs a `FieldTableReader` from the validated offset range
     /// [`field_table_offset`, `lexicon_offset`). No copying; the reader borrows directly from the buffer.
-    pub(crate) fn field_table(&self) -> Result<FieldTableReader<'a>, SegmentError> {
+    ///
+    /// # Errors
+    /// Returns `SegmentError` if the field table section is truncated or out of bounds.
+    pub fn field_table(&self) -> Result<FieldTableReader<'a>, SegmentError> {
         FieldTableReader::new(
             self.buffer,
             self.header.field_table_offset,
@@ -123,7 +119,10 @@ impl<'a> SegmentView<'a> {
     ///
     /// Constructs a `LexiconReader` from the validated offset range
     /// [`lexicon_offset`, `postings_table_offset`). No copying; the reader borrows directly from the buffer.
-    pub(crate) fn lexicon(&self) -> Result<LexiconReader<'a>, SegmentError> {
+    ///
+    /// # Errors
+    /// Returns `SegmentError` if the lexicon section is truncated or out of bounds.
+    pub fn lexicon(&self) -> Result<LexiconReader<'a>, SegmentError> {
         LexiconReader::new(
             self.buffer,
             self.header.lexicon_offset,
@@ -135,7 +134,10 @@ impl<'a> SegmentView<'a> {
     ///
     /// Constructs a `PostingsTableReader` from the validated offset range
     /// [`postings_table_offset`, `postings_data_offset`). No copying; the reader borrows directly from the buffer.
-    pub(crate) fn postings_table(&self) -> Result<PostingsTableReader<'a>, SegmentError> {
+    ///
+    /// # Errors
+    /// Returns `SegmentError` if the postings table section is truncated or out of bounds.
+    pub fn postings_table(&self) -> Result<PostingsTableReader<'a>, SegmentError> {
         PostingsTableReader::new(
             self.buffer,
             self.header.postings_table_offset,
@@ -147,7 +149,10 @@ impl<'a> SegmentView<'a> {
     ///
     /// Constructs a `PostingsDataReader` from the validated offset range
     /// [`postings_data_offset`, `block_meta_offset`). No copying; the reader borrows directly from the buffer.
-    pub(crate) fn postings_data(&self) -> Result<PostingsDataReader<'a>, SegmentError> {
+    ///
+    /// # Errors
+    /// Returns `SegmentError` if the postings data section is truncated or out of bounds.
+    pub fn postings_data(&self) -> Result<PostingsDataReader<'a>, SegmentError> {
         PostingsDataReader::new(
             self.buffer,
             self.header.postings_data_offset,
@@ -155,17 +160,36 @@ impl<'a> SegmentView<'a> {
         )
     }
 
-    /// Access the block metadata section as a borrowed reader (reserved for future releases).
+    /// Access the block metadata section as a borrowed reader.
     ///
     /// Constructs a `BlockMetadataReader` from the validated offset range
-    /// [`block_meta_offset`, `stored_fields_offset`). In the current format, this section is zero-length.
+    /// [`block_meta_offset`, `stored_fields_offset`). In the current format, this section may be zero-length.
     /// No copying; the reader borrows directly from the buffer.
-    pub(crate) fn block_meta(&self) -> Result<BlockMetadataReader<'a>, SegmentError> {
+    ///
+    /// # Errors
+    /// Returns `SegmentError` if the block metadata section is truncated or out of bounds.
+    pub fn block_meta(&self) -> Result<BlockMetadataReader<'a>, SegmentError> {
         BlockMetadataReader::new(
             self.buffer,
             self.header.block_meta_offset,
             self.header.stored_fields_offset,
         )
+    }
+
+    /// Returns the total number of fields in this segment.
+    ///
+    /// # Errors
+    /// Returns `SegmentError` if the field table section is truncated or out of bounds.
+    pub fn field_count(&self) -> Result<u32, SegmentError> {
+        self.field_table().map(|reader| reader.len())
+    }
+
+    /// Returns the total number of unique terms in this segment across all fields.
+    ///
+    /// # Errors
+    /// Returns `SegmentError` if the lexicon section is truncated or out of bounds.
+    pub fn term_count(&self) -> Result<u32, SegmentError> {
+        self.lexicon().map(|reader| reader.len())
     }
 
     /// Returns the total number of documents in this segment.

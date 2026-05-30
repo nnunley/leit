@@ -16,11 +16,7 @@ pub mod header;
 )]
 pub mod footer;
 
-#[expect(
-    unreachable_pub,
-    reason = "reader items are consumed by SegmentView; unreachable in the lib build until then"
-)]
-pub mod readers;
+pub(crate) mod readers;
 
 #[expect(
     unreachable_pub,
@@ -41,4 +37,7 @@ pub mod view;
 pub mod block_meta;
 
 pub use header::{FORMAT_VERSION, HEADER_SIZE, MAGIC, SegmentHeader};
+pub use readers::{
+    BlockMetadataReader, FieldTableReader, LexiconReader, PostingsDataReader, PostingsTableReader,
+};
 pub use view::SegmentView;

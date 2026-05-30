@@ -44,4 +44,8 @@ pub use segment::DirectorySegmentView;
     reason = "SectionKind is a deprecated Phase 1 artifact; kept for frozen compatibility"
 )]
 pub use segment::SectionKind;
-pub use segment_format::{FORMAT_VERSION, HEADER_SIZE, MAGIC, SegmentHeader, SegmentView};
+pub use segment_format::{
+    BlockMetadataReader, FORMAT_VERSION, FieldTableReader, HEADER_SIZE, LexiconReader, MAGIC,
+    PostingsDataReader, PostingsTableReader, SegmentHeader, SegmentView,
+};
+pub use segment_index::SegmentIndex;

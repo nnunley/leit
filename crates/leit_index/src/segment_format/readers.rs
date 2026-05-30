@@ -25,14 +25,6 @@
 //! **`no_std`+`alloc`:** Readers hold only borrowed slices and
 //! validated offsets; no allocation beyond the struct itself.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "readers are consumed only by the (currently crate-internal) segment view; unused in the lib build until that view is wired into a public consumer"
-    )
-)]
-
 use crate::error::SegmentError;
 
 /// Helper: convert usize offset to u64 for bounds checking.
@@ -159,7 +151,7 @@ impl<'a> FieldTableReader<'a> {
         self.count == 0
     }
 
-    /// Get field metadata entry [i]: (`field_id`, `doc_count`, `total_terms`).
+    /// Get the field metadata entry at index `i`: (`field_id`, `doc_count`, `total_terms`).
     ///
     /// # Arguments
     /// * `i` - entry index (`0..len()`)
@@ -321,7 +313,7 @@ impl<'a> LexiconReader<'a> {
         self.count == 0
     }
 
-    /// Get lexicon entry [i]: (`term_bytes`, `postings_table_index`).
+    /// Get the lexicon entry at index `i`: (`term_bytes`, `postings_table_index`).
     ///
     /// # Arguments
     /// * `i` - entry index (`0..len()`)
@@ -493,7 +485,7 @@ impl<'a> PostingsTableReader<'a> {
         self.count == 0
     }
 
-    /// Get postings metadata entry [i]: (`postings_data_offset`, `postings_data_len`, `doc_freq`, `reserved_codec_id`, `first_block_index`, `block_count`).
+    /// Get the postings metadata entry at index `i`: (`postings_data_offset`, `postings_data_len`, `doc_freq`, `reserved_codec_id`, `first_block_index`, `block_count`).
     ///
     /// # Arguments
     /// * `i` - entry index (`0..len()`)
@@ -650,7 +642,6 @@ impl<'a> PostingsDataReader<'a> {
     }
 
     /// True if the postings data section is empty (zero-length).
-    #[expect(dead_code, reason = "reserved for future API")]
     pub fn is_empty(&self) -> bool {
         self.section_start == self.section_end
     }
@@ -668,10 +659,6 @@ impl<'a> PostingsDataReader<'a> {
 /// **Alignment-free access:** Each entry is decoded via manual little-endian reads of three u32 fields
 /// (see `BlockMetadataEntry::from_le_bytes`), not bytemuck casts. This ensures correct behavior regardless
 /// of the buffer's base alignment or the section's byte offset within the buffer.
-#[expect(
-    unreachable_pub,
-    reason = "pub(crate) for SegmentView visibility in current implementation"
-)]
 #[derive(Clone, Copy, Debug)]
 pub struct BlockMetadataReader<'a> {
     buffer: &'a [u8],
@@ -747,7 +734,7 @@ impl<'a> BlockMetadataReader<'a> {
         self.entry_count == 0
     }
 
-    /// Get block metadata entry [i]: (`end_doc`, `max_term_freq`, `decode_offset`).
+    /// Get the block metadata entry at index `i`: (`end_doc`, `max_term_freq`, `decode_offset`).
     ///
     /// # Arguments
     /// * `i` - entry index (`0..len()`)
