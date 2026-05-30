@@ -43,6 +43,12 @@ pub mod block_meta;
 )]
 pub mod mmap;
 
+#[expect(
+    unreachable_pub,
+    reason = "migrate module is for migration tooling; re-export pending Phase 3"
+)]
+pub mod migrate;
+
 pub use header::{FORMAT_VERSION, HEADER_SIZE, MAGIC, SegmentHeader};
 pub use readers::{
     BlockMetadataReader, FieldTableReader, LexiconReader, PostingsDataReader, PostingsTableReader,

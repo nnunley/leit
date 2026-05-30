@@ -283,8 +283,39 @@ WAND consumes — defining them now *helps* Phase 3.
 | DEC-17 block-meta placement | STORY-0085/0022 | ITER-0005 T1/T2/T3 | schema + reader + writer |
 | DEC-18 doc-range implicit | STORY-0086 | ITER-0005 T1/T2/T3/T4 | schema + round-trip |
 | DEC-19 block-meta content schema | STORY-0023/0034 AC-1 | ITER-0005 T1/T2/T3/T4 | POD round-trip + cursor lowering |
-| DEC-20 migration tooling + deprecation | STORY-0033 | ITER-0005 T8 | rewrite round-trip |
+| DEC-20 migration tooling + deprecation | STORY-0033 AC-1/AC-2 | ITER-0005 T8 | rewrite round-trip |
 | DEC-21 mmap loading + thread-safety | STORY-0027/0037 | ITER-0005 T7 | SCENARIO-0018/0025 equivalence tests |
+
+---
+
+## DEC-20 — Segment migration tooling and deprecation policy (STORY-0033 AC-1/AC-2) — RESOLVED
+
+**Decision:** The v1 segment format is **supported unbounded with no planned sunset**. The migration framework establishes a **version-dispatch mechanism** for future versions:
+- **Current version (v1):** supported indefinitely.
+- **Supported versions set:** only v1; future versions may define a sliding window (e.g., "last 2 versions") when v2 is introduced.
+- **Migration entry point:** `migrate_to_current(bytes: &[u8]) -> Result<Cow<'_, [u8]>, SegmentError>` (module `segment_format::migrate`) validates the segment version and:
+  - If v1 (current): structurally validate and return borrowed bytes unchanged (identity migration).
+  - If older but supported: apply a version-specific rewrite handler (placeholder for future versions).
+  - If unsupported: return `SegmentError::UnsupportedVersion{found, expected}` with the found version and expected FORMAT_VERSION, enabling tooling to report which version is required.
+- **Rejection is explicit and clean:** no silent pass-through of unknown versions; no assumptions about backward compatibility.
+
+**Migration policy details (STORY-0033 AC-2):**
+1. **v1 unbounded support:** the first format version, v1, is never deprecated. This decision can be revisited when v2 ships; at that point, the policy will be recorded (e.g., "support last N versions") and implemented via a deprecation horizon in the migration dispatcher.
+2. **Deprecation window:** when v2 is introduced, the migration module will carry explicit version constants (e.g., `SUPPORTED_VERSIONS: &[u32] = &[1, 2]` or `&[2]` if v1 is dropped), and `migrate_to_current()` will dispatch version-by-version:
+   ```rust
+   match header.version {
+       1 => migrate_v1_to_current(bytes),
+       2 => migrate_v2_to_current(bytes),
+       unsupported => Err(UnsupportedVersion{found: unsupported, expected: FORMAT_VERSION})
+   }
+   ```
+3. **Rebuild-via-tooling:** segments at dropped versions are not automatically migrated in-place. Instead, they are cleanly rejected with an informative error; the operator must rebuild via offline tooling (re-index or batch rewrite).
+
+**Rationale:** Handover model: "explicit versioning + clean rejection, never silent corruption or misreading." A migration framework separates version concerns from read logic (v1 reader is version-agnostic; migration is an offline step). Unbounded v1 support avoids a premature deprecation deadline while leaving room for a formal policy in Phase 3.
+
+**Verification (STORY-0033 AC-3):** `migrate_to_current()` rejects unknown versions cleanly (test: mutate header version to 99, verify `UnsupportedVersion{found:99, expected:1}`). The ITER-0004 reader (`SegmentView::open()`) also rejects unknown versions at the same version-check seam (regression test confirms both paths reject consistently).
+
+**Enforced by:** ITER-0005 T8 (`segment_format::migrate` module).
 
 ---
 
