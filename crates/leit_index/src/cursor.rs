@@ -25,13 +25,6 @@ pub(crate) struct MemPostingsCursor<'a> {
 
 impl<'a> MemPostingsCursor<'a> {
     /// Create a new cursor positioned at the start of the postings slice.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "constructed by the execution path in ITER-0003B T2"
-        )
-    )]
     pub(crate) fn new(postings: &'a [PostingEntry]) -> Self {
         Self { postings, pos: 0 }
     }

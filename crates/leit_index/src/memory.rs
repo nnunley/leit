@@ -8,10 +8,12 @@ use core::ops::{AddAssign, MulAssign};
 
 use leit_collect::Collector;
 use leit_core::{FieldId, FilterEvaluator, QueryNodeId, Score, ScoredHit, TermId};
+use leit_postings::cursor::{CursorStatus, TfCursor};
 use leit_query::{ExecutionPlan, FieldRegistry, QueryNode, QueryProgram, TermDictionary};
 use leit_text::FieldAnalyzers;
 
 use crate::codec::encode_segment;
+use crate::cursor::MemPostingsCursor;
 use crate::error::IndexError;
 use crate::search::{ExecutionStats, FieldHit, SearchScorer};
 
@@ -495,9 +497,12 @@ impl InMemoryIndex {
         }
     }
 
-    fn score_posting(
+    /// Score a document given its term frequency. Shared scoring core driven by
+    /// the generic `score_via_cursor` helper over any `TfCursor`.
+    fn score_doc_tf(
         &self,
-        posting: &PostingEntry,
+        doc_id: u32,
+        term_freq: u32,
         field: FieldId,
         boost: f32,
         scoring: SearchScorer,
@@ -507,12 +512,12 @@ impl InMemoryIndex {
     ) -> Score {
         let doc_length = self
             .field_doc_lengths
-            .get(&(posting.doc_id, field))
+            .get(&(doc_id, field))
             .copied()
             .unwrap_or_default();
         let mut score = scoring.score_term(
             field,
-            posting.term_freq,
+            term_freq,
             doc_length,
             avg_doc_length,
             doc_count,
@@ -522,6 +527,50 @@ impl InMemoryIndex {
             MulAssign::mul_assign(&mut score, boost);
         }
         score
+    }
+
+    /// Score postings via a generic cursor, invoking a sink for each scored document.
+    ///
+    /// This helper enables STORY-0001 cursor integration: both in-memory (via `MemPostingsCursor`)
+    /// and compressed (via `CompressedCursor`, deferred to T3) paths route through the same
+    /// generic scorer. The cursor drives traversal (`current_doc`, `current_tf`, `advance`);
+    /// the sink receives `(doc_id, score)` pairs. The caller is responsible for stats updates.
+    ///
+    /// # Type Parameters
+    /// - `C`: A cursor over postings, implementing `leit_postings::cursor::TfCursor` (which extends `DocCursor`).
+    /// - `FnSink`: A callable that accepts `(u32, Score)` and processes the scored doc (e.g., insert into a map, collect).
+    ///   The sink should increment `stats.scored_postings` if stat tracking is needed.
+    fn score_via_cursor<C, FnSink>(
+        &self,
+        cursor: &mut C,
+        field: FieldId,
+        boost: f32,
+        scoring: SearchScorer,
+        avg_doc_length: f32,
+        doc_count: u32,
+        doc_frequency: u32,
+        mut sink: FnSink,
+    ) where
+        C: TfCursor,
+        FnSink: FnMut(u32, Score),
+    {
+        while let Some(doc_id) = cursor.current_doc() {
+            let term_freq = cursor.current_tf();
+            let score = self.score_doc_tf(
+                doc_id,
+                term_freq,
+                field,
+                boost,
+                scoring,
+                avg_doc_length,
+                doc_count,
+                doc_frequency,
+            );
+            sink(doc_id, score);
+            if matches!(cursor.advance(), CursorStatus::Exhausted) {
+                break;
+            }
+        }
     }
 
     fn eval_term(
@@ -541,19 +590,20 @@ impl InMemoryIndex {
         let doc_count = self.document_count();
         let doc_frequency = u32::try_from(postings.len()).unwrap_or(u32::MAX);
 
-        for posting in postings {
-            stats.scored_postings = stats.scored_postings.saturating_add(1);
-            let score = self.score_posting(
-                posting,
-                field,
-                boost,
-                scoring,
-                avg_doc_length,
-                doc_count,
-                doc_frequency,
-            );
-            results.insert(posting.doc_id, score);
-        }
+        let mut cursor = MemPostingsCursor::new(postings);
+        self.score_via_cursor(
+            &mut cursor,
+            field,
+            boost,
+            scoring,
+            avg_doc_length,
+            doc_count,
+            doc_frequency,
+            |doc_id, score| {
+                stats.scored_postings = stats.scored_postings.saturating_add(1);
+                results.insert(doc_id, score);
+            },
+        );
 
         EvalResult::from_scores(results)
     }
@@ -760,23 +810,25 @@ impl InMemoryIndex {
                 }
             }
 
-            for posting in &postings[block.start..block.end] {
-                stats.scored_postings = stats.scored_postings.saturating_add(1);
-                let score = self.score_posting(
-                    posting,
-                    field,
-                    boost,
-                    scoring,
-                    avg_doc_length,
-                    doc_count,
-                    doc_frequency,
-                );
-                if allow_pruning && collectors.can_skip(score) {
-                    continue;
-                }
-                collectors.collect_scored(ScoredHit::new(posting.doc_id, score));
-                stats.collected_hits = stats.collected_hits.saturating_add(1);
-            }
+            // Score the postings in this block via the cursor helper.
+            let mut cursor = MemPostingsCursor::new(&postings[block.start..block.end]);
+            self.score_via_cursor(
+                &mut cursor,
+                field,
+                boost,
+                scoring,
+                avg_doc_length,
+                doc_count,
+                doc_frequency,
+                |doc_id, score| {
+                    stats.scored_postings = stats.scored_postings.saturating_add(1);
+                    if allow_pruning && collectors.can_skip(score) {
+                        return;
+                    }
+                    collectors.collect_scored(ScoredHit::new(doc_id, score));
+                    stats.collected_hits = stats.collected_hits.saturating_add(1);
+                },
+            );
         }
     }
 
