@@ -40,6 +40,21 @@
 //! - Block iteration logic (block index computation, position tracking).
 //! - Pruning/skip execution (deferred to Phase 3; see `BlockCursor` docs).
 //! - Cursor traversal state (position in decoded slices).
+//!
+//! ## Forward extensibility (STORY-0010)
+//!
+//! The layout is designed to accommodate future posting variants without breaking the v1
+//! cursor API:
+//! - **Positions / payloads** — `DocCursor`/`TfCursor` are the v1 capabilities; a future
+//!   `PositionCursor: TfCursor` adds positions, and a `PayloadCursor` adds payloads, as
+//!   additive layers (DEC-14). The v1 codec carries no positions, so adding them is a new
+//!   parallel section, not a format break.
+//! - **Block summaries / upper bounds** — `BlockSummary` reserves `end_doc` + `max_term_freq`
+//!   today; richer per-block max-score / block-summary slots can be added behind `BlockCursor`
+//!   for Block-Max WAND (Phase 3) without changing `DocCursor`/`TfCursor` callers.
+//! - **Borrowed view** — `PostingsView` is a borrowed window over codec bytes plus a
+//!   cursor-layer summary slice; the segment block-metadata sidecar lowers into that slice in
+//!   ITER-0005 (see `BlockSummary`'s `TODO(ITER-0005)`) with no cursor-API change.
 
 use alloc::vec::Vec;
 
@@ -788,5 +803,113 @@ mod tests {
         assert_eq!(cursor.block_end_doc(), Some(50));
         let bound = cursor.block_max_score();
         assert!(bound.as_f32() >= 5.0);
+    }
+
+    /// SCENARIO-0002/0009 (edge): for a single-block codec with NO block summaries,
+    /// the block-aware API returns a conservative default (`None` / `ScoreBound(0.0)`)
+    /// rather than fabricating a bound. Documents the empty-`block_summaries` contract.
+    #[test]
+    fn block_api_empty_summaries_conservative_default() {
+        let encoded = DeltaVarintCodec.encode(&[
+            (SegmentLocalDocId::new(5), TermFreq::new(2)),
+            (SegmentLocalDocId::new(9), TermFreq::new(4)),
+        ]);
+        // No summaries supplied (the common single-block / DeltaVarint case).
+        let view = PostingsView::new(&encoded, &[]);
+        let mut scratch = DecodeScratch::new();
+        let cursor = CompressedCursor::new(view, &mut scratch).expect("decode should succeed");
+
+        // Positioned at a valid doc, but without summaries the block API is conservative.
+        assert_eq!(cursor.current_doc(), Some(5));
+        assert_eq!(cursor.block_end_doc(), None);
+        assert_eq!(cursor.block_max_score().as_f32(), 0.0);
+    }
+
+    /// SCENARIO-0039 + SCENARIO-0019/0024: one `DecodeScratch` reused across N sequential
+    /// cursors over different postings lists allocates no new buffer capacity after warm-up
+    /// (DEC-13 workspace-borrowed ownership). Capacity-stability is the no_std-friendly proxy
+    /// for "zero allocations across cursor lifetimes".
+    #[test]
+    fn scratch_reuse_no_realloc() {
+        // Pre-size the scratch so the first cursor does not need to grow it.
+        let mut scratch = DecodeScratch::with_capacity(64);
+
+        let lists: [&[(SegmentLocalDocId, TermFreq)]; 3] = [
+            &[
+                (SegmentLocalDocId::new(1), TermFreq::new(1)),
+                (SegmentLocalDocId::new(4), TermFreq::new(2)),
+            ],
+            &[
+                (SegmentLocalDocId::new(2), TermFreq::new(3)),
+                (SegmentLocalDocId::new(8), TermFreq::new(1)),
+                (SegmentLocalDocId::new(9), TermFreq::new(5)),
+            ],
+            &[(SegmentLocalDocId::new(7), TermFreq::new(9))],
+        ];
+
+        let mut cap_after_warmup = None;
+        for list in lists {
+            let encoded = DeltaVarintCodec.encode(list);
+            let view = PostingsView::new(&encoded, &[]);
+            {
+                let mut cursor = DefaultCursorFactory
+                    .open_doc_cursor(view, &mut scratch)
+                    .expect("decode should succeed");
+                // Drain the cursor (hot path) before the borrow ends.
+                while cursor.current_doc().is_some() {
+                    let _ = cursor.current_tf();
+                    if cursor.advance() == CursorStatus::Exhausted {
+                        break;
+                    }
+                }
+            }
+            // After the first cursor, capacity must never grow again.
+            let cap = scratch.docs.capacity();
+            match cap_after_warmup {
+                None => cap_after_warmup = Some(cap),
+                Some(prev) => assert_eq!(cap, prev, "scratch reallocated across cursors"),
+            }
+        }
+    }
+
+    /// SCENARIO-0040: hot-path traversal (`advance`, `current_doc`, `advance_to`) over an
+    /// already-decoded cursor causes no buffer growth, and the cursor struct stays small.
+    ///
+    /// Decoding happens once at cursor construction; the hot-path methods only step an
+    /// index over the borrowed slices. With a pre-sized scratch large enough to hold the
+    /// decoded list, capacity is unchanged after a long traversal loop.
+    #[test]
+    fn hot_path_capacity_stable_and_cursor_small() {
+        // Cursor is a lightweight, borrow-only struct (3 slices + an index).
+        assert!(
+            size_of::<CompressedCursor<'_>>() < 100,
+            "CompressedCursor should be a small stack value"
+        );
+
+        let postings: Vec<(SegmentLocalDocId, TermFreq)> = (0..50_u32)
+            .map(|i| (SegmentLocalDocId::new(i * 3), TermFreq::new(i + 1)))
+            .collect();
+        let encoded = BlockDeltaCodec.encode(&postings);
+        let view = PostingsView::new(&encoded, &[]);
+        // Pre-size large enough that decoding 50 docs never grows the buffers.
+        let mut scratch = DecodeScratch::with_capacity(64);
+
+        {
+            let mut cursor = DefaultCursorFactory
+                .open_doc_cursor(view, &mut scratch)
+                .expect("decode should succeed");
+            // Tight hot-path loop: advance + read, plus a seek when exhausted.
+            for _ in 0..1000 {
+                let _ = cursor.current_doc();
+                let _ = cursor.current_tf();
+                if cursor.advance() == CursorStatus::Exhausted {
+                    // Already exhausted: advance_to must stay exhausted (no backward move).
+                    assert_eq!(cursor.advance_to(0), CursorStatus::Exhausted);
+                    break;
+                }
+            }
+        }
+        // Decoding 50 docs into a 64-capacity scratch must not have reallocated.
+        assert_eq!(scratch.docs.capacity(), 64);
     }
 }

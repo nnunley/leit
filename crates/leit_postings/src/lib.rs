@@ -20,6 +20,14 @@ use leit_core::{EntityId, TermId};
 pub mod codec;
 pub mod cursor;
 
+// Canonical Phase-2 cursor architecture (compressed postings, segment-local `u32` doc IDs).
+// These are the crate-root cursor traits/types; the generic in-memory `InMemoryCursor`
+// (Phase 1) exposes its own inherent methods and `BlockCursorState`.
+pub use cursor::{
+    BlockCursor, BlockDecoder, BlockSummary, CompressedCursor, CursorFactory, CursorStatus,
+    DecodeScratch, DefaultCursorFactory, DocCursor, PostingsView, ScoreBound, TfCursor,
+};
+
 /// A single posting: term occurrence in a document with ``Id``.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Posting<Id: EntityId> {
@@ -133,27 +141,14 @@ impl Default for InMemoryTermDictionary {
     }
 }
 
-/// Cursor for traversing postings by document.
-pub trait DocCursor<Id: EntityId> {
-    /// Get the current document ID.
-    fn doc(&self) -> Option<Id>;
-
-    /// Advance to the next document.
-    /// Returns true if there is a next document.
-    fn advance(&mut self) -> bool;
-
-    /// Seek to a specific document or the first after it.
-    /// Returns true if found.
-    fn seek(&mut self, target: Id) -> bool;
-}
-
-/// Cursor with term frequency access.
-pub trait TfCursor<Id: EntityId>: DocCursor<Id> {
-    /// Get term frequency for the current document.
-    fn term_freq(&self) -> u32;
-}
-
-/// Public block-aware cursor state for optional pruning-oriented traversal.
+/// Block-aware state for the in-memory cursor's optional pruning-oriented traversal.
+///
+/// This is the **in-memory** (`Phase 1`, generic over `Id`) block seam. The canonical
+/// compressed-postings cursor architecture (`Phase 2`) lives in the [`cursor`] module —
+/// [`cursor::DocCursor`], [`cursor::TfCursor`], [`cursor::BlockCursor`] and friends, which
+/// operate on segment-local `u32` doc IDs. The two are intentionally distinct: this generic
+/// in-memory helper supports Phase-1 query paths, while the `cursor` module is the borrowed,
+/// `DecodeScratch`-backed API the index execution path adopts in ITER-0003B.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockCursorState<Id: EntityId> {
     /// The cursor does not expose block metadata.
@@ -167,16 +162,6 @@ pub enum BlockCursorState<Id: EntityId> {
         /// Maximum term frequency within the current block.
         max_term_freq: u32,
     },
-}
-
-/// Optional block-aware cursor extension.
-pub trait BlockCursor<Id: EntityId>: TfCursor<Id> {
-    /// Return the current block summary or explain why it is unavailable.
-    fn block_state(&self) -> BlockCursorState<Id>;
-
-    /// Advance to the next block.
-    /// Returns `true` when another block is available.
-    fn advance_block(&mut self) -> bool;
 }
 
 /// In-memory postings index.
@@ -233,19 +218,23 @@ pub struct InMemoryCursor<'a, Id: EntityId> {
     pos: usize,
 }
 
-impl<Id: EntityId> DocCursor<Id> for InMemoryCursor<'_, Id> {
-    fn doc(&self) -> Option<Id> {
+impl<Id: EntityId> InMemoryCursor<'_, Id> {
+    /// Get the current document ID, or `None` if the cursor is exhausted.
+    pub fn doc(&self) -> Option<Id> {
         self.postings.get(self.pos).map(|p| p.doc_id)
     }
 
-    fn advance(&mut self) -> bool {
+    /// Advance to the next document. Returns `true` if a next document exists.
+    pub fn advance(&mut self) -> bool {
         if self.pos < self.postings.len() {
             self.pos += 1;
         }
         self.pos < self.postings.len()
     }
 
-    fn seek(&mut self, target: Id) -> bool {
+    /// Seek to `target` or the first document with ID ≥ `target`.
+    /// Returns `true` if a document at or after `target` is found.
+    pub fn seek(&mut self, target: Id) -> bool {
         if self.pos >= self.postings.len() {
             return false;
         }
@@ -261,16 +250,14 @@ impl<Id: EntityId> DocCursor<Id> for InMemoryCursor<'_, Id> {
             }
         }
     }
-}
 
-impl<Id: EntityId> TfCursor<Id> for InMemoryCursor<'_, Id> {
-    fn term_freq(&self) -> u32 {
+    /// Get the term frequency for the current document (0 if exhausted).
+    pub fn term_freq(&self) -> u32 {
         self.postings.get(self.pos).map_or(0, |p| p.term_freq)
     }
-}
 
-impl<Id: EntityId> BlockCursor<Id> for InMemoryCursor<'_, Id> {
-    fn block_state(&self) -> BlockCursorState<Id> {
+    /// Return the current block summary, or why it is unavailable.
+    pub fn block_state(&self) -> BlockCursorState<Id> {
         self.postings
             .get(self.pos)
             .map_or(BlockCursorState::Exhausted, |posting| {
@@ -281,7 +268,8 @@ impl<Id: EntityId> BlockCursor<Id> for InMemoryCursor<'_, Id> {
             })
     }
 
-    fn advance_block(&mut self) -> bool {
+    /// Advance to the next block. Returns `true` when another block is available.
+    pub fn advance_block(&mut self) -> bool {
         self.advance()
     }
 }

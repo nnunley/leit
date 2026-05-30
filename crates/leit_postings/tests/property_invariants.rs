@@ -6,9 +6,7 @@
 use std::collections::BTreeMap;
 
 use leit_core::TermId;
-use leit_postings::{
-    BlockCursor, BlockCursorState, DocCursor, InMemoryPostings, Posting, PostingsList, TfCursor,
-};
+use leit_postings::{BlockCursorState, InMemoryPostings, Posting, PostingsList};
 use proptest::collection::vec;
 use proptest::prelude::*;
 
@@ -93,24 +91,21 @@ fn in_memory_cursor_exposes_singleton_block_seam() {
     let mut cursor = postings.cursor(term_id).expect("cursor should exist");
 
     assert_eq!(
-        BlockCursor::block_state(&cursor),
+        cursor.block_state(),
         BlockCursorState::Ready {
             end_doc: 3_u32,
             max_term_freq: 2,
         }
     );
-    assert!(BlockCursor::advance_block(&mut cursor));
+    assert!(cursor.advance_block());
     assert_eq!(cursor.doc(), Some(9_u32));
     assert_eq!(
-        BlockCursor::block_state(&cursor),
+        cursor.block_state(),
         BlockCursorState::Ready {
             end_doc: 9_u32,
             max_term_freq: 5,
         }
     );
-    assert!(!BlockCursor::advance_block(&mut cursor));
-    assert_eq!(
-        BlockCursor::block_state(&cursor),
-        BlockCursorState::Exhausted
-    );
+    assert!(!cursor.advance_block());
+    assert_eq!(cursor.block_state(), BlockCursorState::Exhausted);
 }

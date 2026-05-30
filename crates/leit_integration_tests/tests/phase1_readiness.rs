@@ -12,7 +12,6 @@ use leit_fusion::{RankedResult, fuse_default};
 use leit_index::{
     ExecutionWorkspace, InMemoryIndexBuilder, NoFilter, SearchScorer, SectionKind, SegmentView,
 };
-use leit_postings::DocCursor;
 use leit_query::{
     FeatureSet, FieldRegistry, Planner, PlannerScratch, PlanningContext, QueryNode, TermDictionary,
 };
@@ -595,7 +594,7 @@ fn test_postings_lists() {
         .expect("term cursor should exist");
 
     assert_eq!(cursor.doc(), Some(3));
-    assert_eq!(leit_postings::TfCursor::term_freq(&cursor), 2);
+    assert_eq!(cursor.term_freq(), 2);
     assert!(!cursor.advance());
 }
 
