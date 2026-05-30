@@ -34,5 +34,11 @@ pub mod writer;
 )]
 pub mod view;
 
+#[expect(
+    unreachable_pub,
+    reason = "block_meta module items will be re-exported once BlockMetadataReader is wired (ITER-0005 T2)"
+)]
+pub mod block_meta;
+
 pub use header::{FORMAT_VERSION, HEADER_SIZE, MAGIC, SegmentHeader};
 pub use view::SegmentView;

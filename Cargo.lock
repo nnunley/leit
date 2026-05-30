@@ -588,6 +588,7 @@ dependencies = [
 name = "leit_index"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "leit_collect",
  "leit_core",
  "leit_postings",

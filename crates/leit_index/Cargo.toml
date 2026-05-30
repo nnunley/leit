@@ -12,6 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+bytemuck.workspace = true
 leit_collect.workspace = true
 leit_core.workspace = true
 leit_postings.workspace = true
