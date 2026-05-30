@@ -102,6 +102,19 @@ premise.
 
 **Enforced by:** ITER-0004 (STORY-0090 AC-2, SCENARIO-0025).
 
+**Implementation note (ITER-0004 T2):** `SegmentHeader` (`crates/leit_index/src/segment_format/header.rs`)
+uses explicit manual little-endian field (de)serialization (`u64::from_le_bytes`/`to_le_bytes`) rather than
+a `bytemuck::from_bytes` Pod cast of the header struct. Two reasons: (1) the header is read exactly once per
+segment open, so a zero-copy cast of its 80 bytes is immaterial — the real zero-copy surface is the SECTION
+data, which the borrowed section readers (ITER-0004 T4, DEC-08) expose without copying; (2) manual
+`from_le_bytes` is endianness-correct on every host, whereas a native-field `#[repr(C)]` Pod cast would be
+wrong on big-endian and only the alignment-1 `[u8; N]`-byte-array Pod style (as the segment_ids types use)
+would be portable — adding accessor verbosity for no functional gain on a read-once struct. The on-disk byte
+layout is exactly as DEC-05 specifies (fixed LE, 80 bytes); only the in-memory access idiom differs.
+DOWNSTREAM (ITER-0005 mmap): keep this manual decode — do NOT convert the header to a native Pod cast.
+Also: the v1 magic is `b"LSG1"` (DISTINCT from legacy `b"LSEG"`) so legacy segments are cleanly rejected with
+`BadMagic` rather than misread (DEC-16 reject-and-rebuild + STORY-0039 never-silent-corruption).
+
 ## DEC-06 — Block-aware capability scope (STORY-0081)
 
 **Decision:** Block-aware accessors (`block_max_score()`, `block_end_doc()`, block
@@ -192,6 +205,8 @@ STORY-0047 AC-2/3). **RESOLVED — include a single footer checksum in v1 (confi
 algorithm finalized in ITER-0004 (rapidhash-family or crc32c).**
 
 **Enforced by:** ITER-0004.
+
+**Implementation note (ITER-0004 T3):** Footer is a 4-byte fixed-layout little-endian structure at `footer_offset` containing a single u32 CRC32C (Castagnoli, polynomial 0x1EDC6F41) checksum. The checksum covers all segment bytes from offset 0 up to (but not including) `footer_offset`, so it protects the header, all data sections, and block metadata. CRC32C was chosen over rapidhash (available in workspace dependencies) because rapidhash requires `std` and does not compile in `no_std+alloc` environments — leit_index must remain `no_std` compatible. CRC32C is deterministic, fast (bitwise loop per byte), and sufficient for detecting corruption. The checksum is computed via `compute_checksum()` and verified via `Footer::verify()`, called during `open_with_validation(Full)` in T6. No per-section checksums: a single segment-wide CRC32C is the minimal integrity check for v1 (DEC-10 rationale).
 
 ---
 

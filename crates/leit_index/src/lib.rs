@@ -27,10 +27,12 @@ mod error;
 mod memory;
 mod search;
 mod segment;
+mod segment_format;
 
 pub use builder::{InMemoryIndexBuilder, IndexBuilder};
-pub use error::{IndexError, SegmentError};
+pub use error::{IndexError, SegmentError, ValidationMode};
 pub use leit_core::{FilterEvaluator, FilterSlotId, NoFilter};
 pub use memory::{InMemoryIndex, PostingEntry};
 pub use search::{ExecutionStats, ExecutionWorkspace, SearchScorer};
 pub use segment::{SectionKind, SegmentView};
+pub use segment_format::{FORMAT_VERSION, HEADER_SIZE, MAGIC, SegmentHeader};

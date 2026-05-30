@@ -90,7 +90,10 @@ impl<'a> SegmentView<'a> {
 
         let version = read_u16(bytes, 4)?;
         if version != VERSION {
-            return Err(SegmentError::UnsupportedVersion(version));
+            return Err(SegmentError::UnsupportedVersion {
+                found: version as u32,
+                expected: VERSION as u32,
+            });
         }
 
         let document_count = read_u32(bytes, 8)?;
