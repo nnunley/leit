@@ -129,6 +129,33 @@ mod tests {
     }
 
     #[test]
+    fn test_validated_reads_use_try_cast_variants() {
+        // SCENARIO-0005 (AC-2 validated-read obligation): reads from untrusted
+        // segment bytes go through the fallible `try_*` casts, which return `Err`
+        // on a malformed slice instead of panicking.
+
+        // Correctly-sized 4-byte slice -> Ok.
+        let raw = 0x1234_5678_u32.to_le_bytes();
+        let ok: &BlockId = bytemuck::try_from_bytes(&raw).expect("4-byte slice is a valid BlockId");
+        assert_eq!(ok.get(), 0x1234_5678);
+
+        // Wrong-length slice -> Err, never a panic.
+        let too_short = [0_u8; 3];
+        assert!(bytemuck::try_from_bytes::<BlockId>(&too_short).is_err());
+
+        // try_cast_slice yields a zero-copy &[Id] view for an exact multiple...
+        let ids = [SegmentLocalDocId::new(5), SegmentLocalDocId::new(6)];
+        let bytes: &[u8] = bytemuck::cast_slice(&ids);
+        let view: &[SegmentLocalDocId] =
+            bytemuck::try_cast_slice(bytes).expect("8 bytes round-trips to 2 ids");
+        assert_eq!(view, ids.as_slice());
+
+        // ...and rejects a length that is not a whole number of ids.
+        let ragged = [0_u8; 7];
+        assert!(bytemuck::try_cast_slice::<u8, SegmentLocalDocId>(&ragged).is_err());
+    }
+
+    #[test]
     fn test_unaligned_view_from_offset() {
         // [u8; 4] storage is alignment-1, so views work from any byte offset
         // (mmap safety) — bytemuck's cast succeeds regardless of source alignment.
