@@ -14,6 +14,7 @@ categories.workspace = true
 [dependencies]
 leit_collect.workspace = true
 leit_core.workspace = true
+leit_postings.workspace = true
 leit_query.workspace = true
 leit_score.workspace = true
 leit_text.workspace = true
@@ -21,11 +22,12 @@ leit_text.workspace = true
 [features]
 default = ["std"]
 std = [
+    "leit_collect/std",
     "leit_core/std",
-    "leit_text/std",
+    "leit_postings/std",
     "leit_query/std",
     "leit_score/std",
-    "leit_collect/std",
+    "leit_text/std",
 ]
 
 [dev-dependencies]

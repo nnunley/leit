@@ -22,6 +22,7 @@ extern crate std;
 
 mod builder;
 mod codec;
+mod cursor;
 mod error;
 mod memory;
 mod search;

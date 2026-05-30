@@ -378,3 +378,26 @@ the existing thin trait stack already in `leit_postings` (which this iteration e
 cursor-traversal query shapes (single / OR / AND / fielded / BM25F operands). Full *wired index*
 query-path confirmation is subsumed by ITER-0003B's ranking-equivalence proof (SCENARIO-0026). Decided in
 ITER-0003.
+
+## DEC-15 — Index→cursor integration approach (STORY-0001, ITER-0003B) — RESOLVED
+
+**Decision:** Dual cursor sources behind one trait-based executor. The `InMemoryIndex` term-scoring path
+is refactored to score through a single helper generic over `leit_postings::cursor::TfCursor`. The DEFAULT
+in-memory production path uses a new zero-copy in-memory cursor (`MemPostingsCursor`) over `&[PostingEntry]`
+— no encode, no decode, no allocation. The COMPRESSED path (`PostingsView` + `DecodeScratch` +
+`CompressedCursor`) is wired as an alternate execution source through the same machinery and proven to
+produce identical top-k.
+
+**Rationale:** The only concrete `TfCursor` impl, `CompressedCursor`, decodes codec-encoded bytes; routing
+the in-memory path through it would force encode-once + decode-per-query — a perf regression for the
+in-memory index, which already holds uncompressed postings in RAM. The segment format that will naturally
+hold compressed bytes does not exist until ITER-0004. A zero-copy in-memory cursor keeps the default path
+non-regressing while still unifying execution on the cursor trait API.
+
+**Boxing-in:** None. ITER-0004 later supplies compressed segment bytes into the SAME `PostingsView`
+/`CompressedCursor` source already wired here. The in-memory cursor lives in `leit_index` (it borrows the
+`leit_index`-owned `PostingEntry`), so `leit_postings` stays unaware of `leit_index` (clean dependency
+direction; orphan rule satisfied — `leit_index` owns the cursor type, `leit_postings` owns the trait).
+
+**Evidence:** non-regression = all existing leit_index + integration tests stay green; ranking equivalence
+= SCENARIO-0026 (in-memory vs DeltaVarint vs BlockDelta cursor sources yield bit-identical top-k).
