@@ -36,6 +36,13 @@ pub mod view;
 )]
 pub mod block_meta;
 
+#[cfg(feature = "mmap")]
+#[expect(
+    unreachable_pub,
+    reason = "mmap module and its exports are part of the public API when feature is enabled"
+)]
+pub mod mmap;
+
 pub use header::{FORMAT_VERSION, HEADER_SIZE, MAGIC, SegmentHeader};
 pub use readers::{
     BlockMetadataReader, FieldTableReader, LexiconReader, PostingsDataReader, PostingsTableReader,

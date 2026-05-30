@@ -44,6 +44,9 @@ pub use segment::DirectorySegmentView;
     reason = "SectionKind is a deprecated Phase 1 artifact; kept for frozen compatibility"
 )]
 pub use segment::SectionKind;
+#[cfg(feature = "mmap")]
+pub use segment_format::mmap::{MmapError, MmapSegment, MmapSegmentViewBuilder};
+pub use segment_format::migrate::migrate_to_current;
 pub use segment_format::{
     BlockMetadataReader, FORMAT_VERSION, FieldTableReader, HEADER_SIZE, LexiconReader, MAGIC,
     PostingsDataReader, PostingsTableReader, SegmentHeader, SegmentView,

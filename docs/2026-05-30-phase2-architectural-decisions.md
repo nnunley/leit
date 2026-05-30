@@ -283,6 +283,8 @@ WAND consumes — defining them now *helps* Phase 3.
 | DEC-17 block-meta placement | STORY-0085/0022 | ITER-0005 T1/T2/T3 | schema + reader + writer |
 | DEC-18 doc-range implicit | STORY-0086 | ITER-0005 T1/T2/T3/T4 | schema + round-trip |
 | DEC-19 block-meta content schema | STORY-0023/0034 AC-1 | ITER-0005 T1/T2/T3/T4 | POD round-trip + cursor lowering |
+| DEC-20 migration tooling + deprecation | STORY-0033 | ITER-0005 T8 | rewrite round-trip |
+| DEC-21 mmap loading + thread-safety | STORY-0027/0037 | ITER-0005 T7 | SCENARIO-0018/0025 equivalence tests |
 
 ---
 
@@ -579,3 +581,33 @@ the cursor itself sees only the summary (end_doc, max_term_freq).
 
 **Enforced by:** ITER-0005 T1 (schema struct + round-trip bytemuck test),
 T2 (BlockMetadataReader), T3 (writer), T4 (overhead-bytes proof + cursor lowering).
+
+## DEC-21 — Memory-mapped segment loading: thread-safety model (STORY-0027, STORY-0037) — RESOLVED
+
+**Decision:** Segment files may be loaded into memory via `MmapSegment::open(path)`, which
+memory-maps the file and validates the header on construction. The mmap'd bytes are accessed
+via `as_view() -> SegmentView<'_>`, with the lifetime tied to the mmap handle. The feature is
+`mmap` (std-only, feature-gated); it is NOT included in no_std builds.
+
+**Thread-safety model:** `memmap2::Mmap` is `Send + Sync` for read-only maps. A `MmapSegment`
+owning the mmap handle can be wrapped in `Arc` and shared across threads. Each thread obtains
+a `SegmentView<'_>` borrowing the mmap region with a lifetime tied to the borrowing thread's
+scope. Rust's borrow-checking ensures no data races: the borrowed view cannot outlive either
+the mmap handle or the thread's stack frame. **Phase 3 ITER-0006 merge may safely read source
+segments in parallel**, wrapping `MmapSegment` in `Arc<MmapSegment>` and cloning the arc per
+thread; each thread constructs local `SegmentView`s that cannot escape the thread's lifetime.
+
+**Header validation:** On open, the header is validated (magic bytes and version checked) using
+`ValidationMode::HeaderOnly` to minimize latency. Callers may request structural or full
+validation via `as_view()`, which re-validates with the requested mode (offsets, section
+ordering, checksum, etc.).
+
+**Rejected alternatives:**
+- **Lazy validation (defer to first access):** complicates error handling and delays failure
+  detection. Eager validation on open (even lightweight header-only) catches I/O and corruption
+  early.
+- **Stored-in-memory snapshot:** defeats the purpose of mmap (zero-copy, large-file support).
+  The borrowed `SegmentView` lifetime already provides safety without copying.
+
+**Enforced by:** ITER-0005 T7 (MmapSegment + equivalence tests).
+**Unblocks:** ITER-0006 (merge may read source segments in parallel via `Arc<MmapSegment>`).

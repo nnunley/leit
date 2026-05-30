@@ -61,6 +61,9 @@ icu_casemap = { version = "2.1.1" }
 icu_locale_core = { default-features = false, version = "2.1.1" }
 icu_normalizer = { version = "2.1.1" }
 
+# Memory-mapped file I/O (std-only, feature-gated in leit_index)
+memmap2 = { version = "0.9" }
+
 [workspace.lints]
 # LINEBENDER LINT SET - Cargo.toml - v8
 # See https://linebender.org/wiki/canonical-lints/

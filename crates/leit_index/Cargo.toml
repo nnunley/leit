@@ -19,6 +19,7 @@ leit_postings.workspace = true
 leit_query.workspace = true
 leit_score.workspace = true
 leit_text.workspace = true
+memmap2 = { optional = true, workspace = true }
 
 [features]
 default = ["std"]
@@ -30,6 +31,7 @@ std = [
     "leit_score/std",
     "leit_text/std",
 ]
+mmap = ["std", "dep:memmap2"]
 
 [dev-dependencies]
 proptest = { workspace = true }
