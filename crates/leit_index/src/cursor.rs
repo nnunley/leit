@@ -12,13 +12,15 @@ use leit_postings::cursor::{CursorStatus, DocCursor, TfCursor};
 
 /// Selector for the cursor source to use during scoring.
 ///
-/// STORY-0008 AC-1: cursor source is selectable at scoring entry points (`eval_term`, `collect_term`).
+/// Cursor source is selectable at scoring entry points (`eval_term`, `collect_term`).
 /// Non-regression: all public callers default to `InMemory`, preserving existing behavior.
-/// STORY-0088 AC-2: SCENARIO-0026 (e2e equivalence test) exercises both `Compressed` variants.
+/// The e2e equivalence test exercises both `Compressed` variants.
 ///
-/// # TODO(ITER-0004)
-/// In ITER-0004, the compressed source here encodes on the fly. A future segment format will
-/// supply segment bytes directly to `PostingsView`, bypassing the encode step.
+/// # TODO: segment-backed execution
+/// The compressed source here encodes on the fly. The segment format stores codec-encoded `postings_data`,
+/// so a `PostingsView` can now be constructed over segment bytes — but wiring that into the cursor execution
+/// path (segment-backed query execution, bypassing the encode step) is integration work that pairs naturally
+/// with segment/mmap loading.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum CursorSource {
     /// Use the zero-copy in-memory postings cursor (default, no regression).
@@ -26,13 +28,12 @@ pub(crate) enum CursorSource {
     InMemory,
     /// Encode postings with a selected codec and decode via `CompressedCursor`.
     ///
-    /// Selected by segment-backed execution in ITER-0004; in ITER-0003B it is constructed
-    /// only by the SCENARIO-0026 equivalence test, so the variant is dead in non-test builds.
+    /// Currently exercised only by the e2e equivalence test; the variant is dead in non-test builds.
     #[cfg_attr(
         not(test),
         expect(
             dead_code,
-            reason = "compressed source is selected by segment-backed execution in ITER-0004; exercised now by SCENARIO-0026"
+            reason = "compressed source is exercised by the e2e equivalence test only"
         )
     )]
     Compressed(leit_postings::codec::CodecId),

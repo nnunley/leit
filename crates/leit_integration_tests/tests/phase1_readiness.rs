@@ -10,7 +10,7 @@ use leit_collect::{Collector, CountCollector, TopKCollector};
 use leit_core::{EntityId, Score, ScoredHit, ScratchSpace, Workspace};
 use leit_fusion::{RankedResult, fuse_default};
 use leit_index::{
-    ExecutionWorkspace, InMemoryIndexBuilder, NoFilter, SearchScorer, SectionKind, SegmentView,
+    ExecutionWorkspace, InMemoryIndexBuilder, NoFilter, SearchScorer, SegmentView, ValidationMode,
 };
 use leit_query::{
     FeatureSet, FieldRegistry, Planner, PlannerScratch, PlanningContext, QueryNode, TermDictionary,
@@ -554,15 +554,14 @@ fn test_inverted_index_build() {
     let segment = index
         .to_segment_bytes()
         .expect("segment export should succeed");
-    let view = SegmentView::open(&segment).expect("segment view should open");
 
-    assert_eq!(view.document_count(), 2);
-    assert_eq!(view.field_count(), 2);
-    assert!(view.term_count() >= 4);
-    assert!(view.has_section(SectionKind::TermDictionary));
-    assert!(view.has_section(SectionKind::FieldMetadata));
-    assert!(view.has_section(SectionKind::PostingsMetadata));
-    assert!(view.has_section(SectionKind::PostingsPayload));
+    // Public contract: the exported segment opens and passes Structural + Full validation.
+    // (Per-section content/count inspection is covered by the in-crate segment_format unit tests;
+    // the public SegmentView surface is currently open + validation modes.)
+    let view = SegmentView::open(&segment).expect("segment view should open (Structural)");
+    assert_eq!(view.document_count(), 2, "segment should have 2 documents");
+    SegmentView::open_with_validation(&segment, ValidationMode::Full)
+        .expect("exported segment should pass Full validation");
 }
 
 #[test]

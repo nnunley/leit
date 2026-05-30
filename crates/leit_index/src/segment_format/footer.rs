@@ -1,7 +1,7 @@
 // Copyright 2026 the Leit Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Segment footer: fixed-layout, little-endian POD carrying a CRC32C checksum (STORY-0029, STORY-0047).
+//! Segment footer: fixed-layout, little-endian POD carrying a CRC32C checksum.
 //!
 //! The footer is a fixed-size structure located at `footer_offset` from the segment start.
 //! It contains:
@@ -9,7 +9,7 @@
 //!
 //! Total: 4 bytes.
 //!
-//! **Checksum coverage (STORY-0029 AC-2):** The checksum value protects all segment bytes
+//! **Checksum coverage:** The checksum value protects all segment bytes
 //! from offset 0 up to (but not including) the footer start (`footer_offset`). This includes
 //! the header, field table, lexicon, postings table, postings data, and block metadata sections.
 //! The footer itself is NOT included in the checksum (the checksum cannot include its own value).
@@ -21,18 +21,17 @@
 //! - Fast bitwise computation
 //! - Catches bit-flips and byte corruption effectively
 //!
-//! **Validation (DEC-07 + STORY-0026 AC-6):** Footer verification is performed only in
+//! **Validation:** Footer verification is performed only in
 //! `ValidationMode::Full`. The `Footer::verify()` function reads the footer checksum,
 //! recomputes the checksum over the covered bytes, and returns `BadChecksum` if they
-//! do not match. This primitive is called by `open_with_validation(Full)` during segment open
-//! (implemented in ITER-0004 T6).
+//! do not match. This primitive is called by `open_with_validation(Full)` during segment open.
 
 use crate::error::SegmentError;
 
 /// Fixed serialized footer size in bytes.
 pub const FOOTER_SIZE: usize = 4;
 
-/// Segment footer: fixed-layout, little-endian POD (STORY-0029).
+/// Segment footer: fixed-layout, little-endian POD.
 ///
 /// The footer occupies exactly 4 bytes at offset `footer_offset` of every segment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,7 +75,7 @@ impl Footer {
     ///
     /// Reads the footer at `footer_offset`, recomputes the checksum over the covered
     /// byte range `[0, footer_offset)`, and returns `BadChecksum` if they do not match.
-    /// This is the Full-mode validation entry point (STORY-0026 AC-6).
+    /// This is the Full-mode validation entry point.
     ///
     /// # Arguments
     /// * `segment_bytes` - complete segment buffer

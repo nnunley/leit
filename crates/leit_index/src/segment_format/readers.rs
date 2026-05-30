@@ -1,33 +1,32 @@
 // Copyright 2026 the Leit Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Borrowed section readers for Phase 2 segment format v1 (DEC-02, DEC-03, DEC-08, STORY-0040,
-//! STORY-0044, STORY-0045, STORY-0046).
+//! Borrowed section readers for segment format v1.
 //!
 //! Each reader borrows `&[u8]` directly from the segment buffer and provides zero-copy,
 //! O(1) access to fixed-width entries. Variable-length data (term bytes) is addressed via
 //! fixed-width index entries, keeping metadata access O(1).
 //!
-//! **Layouts (DEC-02: fixed-width entries only):**
+//! **Layouts (fixed-width entries only):**
 //!
 //! - `FieldTableReader`: `field_id` (`u32`) + `doc_count` (`u32`) + `total_terms` (`u32`), 12 bytes/entry
 //! - `LexiconReader`: index entries (`term_offset`: `u64` + `term_len`: `u32` + `postings_table_index`: `u32`,
 //!   16 bytes/entry) + variable-length term bytes blob
 //! - `PostingsTableReader`: `postings_data_offset` (`u64`) + `postings_data_len` (`u32`) + `doc_freq` (`u32`)
-//!   + `reserved_codec_id` (`u32`), 20 bytes/entry (STORY-0002 AC-3)
+//!   + `reserved_codec_id` (`u32`), 20 bytes/entry
 //! - `PostingsDataReader`: borrowed postings payload bytes; ranges from `PostingsTableReader` offsets
 //!
 //! All readers validate bounds against the segment buffer and return `SegmentError` on out-of-bounds
-//! access (STORY-0035 AC-2, never panic).
+//! access (never panic).
 //!
-//! **`no_std`+`alloc` (STORY-0025 AC-3, STORY-0032 AC-1):** Readers hold only borrowed slices and
+//! **`no_std`+`alloc`:** Readers hold only borrowed slices and
 //! validated offsets; no allocation beyond the struct itself.
 
 #![cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "readers are consumed by SegmentView, which is pub(crate)/test-only until T7 promotes it to pub"
+        reason = "readers are consumed only by the (currently crate-internal) segment view; unused in the lib build until that view is wired into a public consumer"
     )
 )]
 
@@ -415,13 +414,13 @@ impl<'a> LexiconReader<'a> {
 
 /// Postings table reader: borrows postings metadata entries (fixed-width, O(1) access).
 ///
-/// **Layout (20 bytes per entry, STORY-0002 AC-3):**
+/// **Layout (20 bytes per entry):**
 /// - Offset 0: count (u32 LE, number of postings entries)
 /// - Offset 4..: entries (20 bytes each):
 ///   - `postings_data_offset` (u64, offset 0)
 ///   - `postings_data_len` (u32, offset 8)
 ///   - `doc_freq` (u32, offset 12)
-///   - `reserved_codec_id` (u32, offset 16) — reserved for per-term codec selection (ITER-0005); currently 0
+///   - `reserved_codec_id` (u32, offset 16) — reserved for per-term codec selection; currently 0
 ///
 /// **Bounds:** `postings_table_offset .. postings_data_offset`
 #[derive(Clone, Copy, Debug)]
@@ -504,7 +503,7 @@ impl<'a> PostingsTableReader<'a> {
             });
         }
 
-        // Entry offset: 4 (count) + i * 20 (STORY-0002 AC-3)
+        // Entry offset: 4 (count) + i * 20
         let i_u64 = i as u64;
         let entry_offset = 4_u64
             .checked_add(i_u64.checked_mul(20).ok_or(SegmentError::BadOffset {
@@ -648,18 +647,18 @@ impl<'a> PostingsDataReader<'a> {
     }
 }
 
-/// Block metadata reader: reserved in v1-core (zero-length in ITER-0004, content in ITER-0005).
+/// Block metadata reader: reserved (currently zero-length, content deferred).
 ///
 /// **Bounds:** `block_meta_offset .. stored_fields_offset`
 ///
-/// In ITER-0004, this section is reserved but zero-length. Iterating readers are deferred to ITER-0005.
+/// This section is reserved but currently zero-length. Iterating readers are deferred for a future release.
 #[expect(
     dead_code,
-    reason = "reserved for ITER-0005; placeholder in v1-core, used by SegmentView"
+    reason = "reserved for future releases; placeholder in current format, used by SegmentView"
 )]
 #[expect(
     unreachable_pub,
-    reason = "pub(crate) for SegmentView visibility during T6"
+    reason = "pub(crate) for SegmentView visibility in current implementation"
 )]
 #[derive(Clone, Copy, Debug)]
 pub struct BlockMetadataReader<'a> {
@@ -679,7 +678,7 @@ impl<'a> BlockMetadataReader<'a> {
     /// # Returns
     /// `BlockMetadataReader` or `SegmentError` if out of bounds.
     ///
-    /// In v1-core, this section is typically zero-length; the reader is reserved for ITER-0005.
+    /// In the current format, this section is typically zero-length; the reader is reserved for future releases.
     pub fn new(
         buffer: &'a [u8],
         block_meta_offset: u64,
@@ -702,7 +701,7 @@ impl<'a> BlockMetadataReader<'a> {
         })
     }
 
-    /// True if the block metadata section is empty (zero-length, reserved in v1-core).
+    /// True if the block metadata section is empty (zero-length, reserved).
     pub fn is_empty(&self) -> bool {
         self.section_start == self.section_end
     }
@@ -741,7 +740,7 @@ mod tests {
         let postings_data_offset = offset;
         offset += postings_data_data.len() as u64;
 
-        // Reserve sections (zero-length in v1-core)
+        // Reserve sections (zero-length in minimal v1)
         let block_meta_offset = offset;
         let stored_fields_offset = offset;
         let columnar_offset = offset;
@@ -751,7 +750,7 @@ mod tests {
             magic: MAGIC,
             version: FORMAT_VERSION,
             format_flags: 0,
-            reserved: 0,
+            document_count: 0,
             field_table_offset,
             lexicon_offset,
             postings_table_offset,
@@ -853,7 +852,7 @@ mod tests {
 
     #[test]
     fn test_postings_table_reader_single_entry() {
-        // Postings table with 1 entry: count (1) + entry (20 bytes, STORY-0002 AC-3)
+        // Postings table with 1 entry: count (1) + entry (20 bytes)
         let mut post_table = vec![];
         post_table.extend_from_slice(&1_u32.to_le_bytes()); // count
         post_table.extend_from_slice(&100_u64.to_le_bytes()); // postings_data_offset
@@ -917,8 +916,8 @@ mod tests {
     }
 
     #[test]
-    fn test_scenario_0047_zero_copy_views() {
-        // SCENARIO-0047 AC-2: a section reader returns a view that BORROWS the source buffer
+    fn test_zero_copy_views() {
+        // A section reader returns a view that BORROWS the source buffer
         // (zero-copy), not a copy. Proof: the bytes returned by a reader must point WITHIN the
         // original buffer's address range, at the exact expected offset — not into freshly
         // allocated memory.
@@ -953,8 +952,8 @@ mod tests {
     }
 
     #[test]
-    fn test_scenario_0011_parse_valid_segment() {
-        // SCENARIO-0011 AC-1/2: parse segment from buffer, retrieve entries without allocation
+    fn test_parse_valid_segment() {
+        // Parse segment from buffer, retrieve entries without allocation
         // Build a minimal segment: field table (1 entry) + lexicon (1 term) + postings table (1 entry) + postings data
         let mut field_data = vec![];
         field_data.extend_from_slice(&1_u32.to_le_bytes()); // count
@@ -1035,7 +1034,7 @@ mod tests {
 
     #[test]
     fn test_bounds_enforcement_truncated() {
-        // STORY-0035: truncated buffer returns Truncated, not panic
+        // Truncated buffer returns Truncated, not panic
         let buffer = vec![0_u8; 85]; // Header (80) + 5 bytes of field data
         let result = FieldTableReader::new(&buffer, 80, 100);
 
@@ -1058,7 +1057,7 @@ mod tests {
         let _post_data_reader = PostingsDataReader::new(&buffer, 200, 200);
     }
 
-    // ========== Adversarial Tests for Integer Overflow (STORY-0035) ==========
+    // ========== Adversarial Tests for Integer Overflow ==========
 
     #[test]
     fn test_postings_data_reader_range_u64_max_offset_without_panic() {

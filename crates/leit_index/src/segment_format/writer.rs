@@ -1,27 +1,25 @@
 // Copyright 2026 the Leit Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-#![allow(dead_code, reason = "private encoder functions called internally")]
-
-//! Segment writer: serializes `InMemoryIndex` to the DEC-05 v1 format.
+//! Segment writer: serializes `InMemoryIndex` to the v1 format.
 //!
-//! This module implements the writer for the Phase 2 segment format (DEC-05), producing:
+//! This module implements the writer for the segment format, producing:
 //! - Fixed 80-byte `SegmentHeader` at offset 0
 //! - 4 populated sections: `field_table`, `lexicon`, `postings_table`, `postings_data`
 //! - 3 reserved zero-length sections: `block_meta`, `stored_fields`, `columnar`
 //! - Footer with CRC32C checksum at `footer_offset`
 //!
-//! **Builder/Reader Separation (DEC-09, STORY-0084 AC-2):**
+//! **Builder/Reader Separation:**
 //! The writer consumes borrowed pieces of `InMemoryIndex` and emits bytes. It does NOT expose
 //! builder types in the public API; all writer internals are private. The output conforms exactly
-//! to the T4 reader layouts for round-trip compatibility.
+//! to the reader layouts for round-trip compatibility.
 //!
-//! **Format Flags (DEC-10):**
+//! **Format Flags:**
 //! - Bit 0: `optional_sections_present` = 0 (`block_meta`, `stored_fields`, `columnar` are absent/zero-length)
 //! - Bits 1-31: reserved for future use
 //!
-//! **Codec ID Marker (STORY-0002 AC-3):**
-//! The postings table reserves space for codec selection per-term (ITER-0005). For v1-core,
+//! **Codec ID Marker:**
+//! The postings table reserves space for codec selection per-term. For the current v1 format,
 //! codec selection is not stored; all postings use uncompressed format.
 
 use alloc::vec::Vec;
@@ -32,14 +30,14 @@ use crate::segment_format::footer::{Footer, compute_checksum};
 use crate::segment_format::header::{FORMAT_VERSION, HEADER_SIZE, MAGIC, SegmentHeader};
 
 /// Format flags: indicate which optional sections are present.
-/// In v1-core (ITER-0004), all optional sections are zero-length, so this is always 0.
+/// In minimal v1, all optional sections are zero-length, so this is always 0.
 const FORMAT_FLAGS_V1_CORE: u32 = 0;
 
-/// Reserved codec ID for uncompressed postings (STORY-0002 AC-3).
-/// Not used in v1-core; reserved for ITER-0005 when postings codecs are implemented.
+/// Reserved codec ID for uncompressed postings.
+/// Not used in current v1; reserved for future releases when postings codecs are implemented.
 const RESERVED_CODEC_ID_UNCOMPRESSED: u32 = 0;
 
-/// Serialize an `InMemoryIndex` to the DEC-05 v1 segment format.
+/// Serialize an `InMemoryIndex` to the v1 segment format.
 ///
 /// This is the main entry point. The function:
 /// 1. Encodes field table, lexicon, postings table, and postings data sections.
@@ -51,12 +49,12 @@ const RESERVED_CODEC_ID_UNCOMPRESSED: u32 = 0;
 /// # Returns
 /// A `Vec<u8>` containing the complete segment buffer.
 pub(crate) fn write_segment(index: &InMemoryIndex) -> Result<Vec<u8>, IndexError> {
-    // Phase 1: Encode sections to byte vectors (sizes not yet known).
+    // Encode sections to byte vectors (sizes not yet known).
     let field_table = encode_field_table(index)?;
     let lexicon = encode_lexicon(index)?;
     let (postings_table, postings_data) = encode_postings(index)?;
 
-    // Phase 2: Compute absolute offsets.
+    // Compute absolute offsets.
     let mut offset = HEADER_SIZE as u64;
 
     let field_table_offset = offset;
@@ -79,7 +77,7 @@ pub(crate) fn write_segment(index: &InMemoryIndex) -> Result<Vec<u8>, IndexError
         .checked_add(postings_data.len() as u64)
         .ok_or(IndexError::ValueOutOfRange)?;
 
-    // Reserved sections (zero-length in v1-core).
+    // Reserved sections (zero-length in minimal v1).
     let block_meta_offset = offset;
     let stored_fields_offset = offset;
     let columnar_offset = offset;
@@ -89,7 +87,7 @@ pub(crate) fn write_segment(index: &InMemoryIndex) -> Result<Vec<u8>, IndexError
     // Footer is 4 bytes (note: offset is not used after this, but we validate it for completeness).
     let _footer_end = offset.checked_add(4).ok_or(IndexError::ValueOutOfRange)?;
 
-    // Phase 3: Assemble the segment.
+    // Assemble the segment.
     let mut segment = Vec::new();
 
     // Write header at offset 0.
@@ -97,7 +95,7 @@ pub(crate) fn write_segment(index: &InMemoryIndex) -> Result<Vec<u8>, IndexError
         magic: MAGIC,
         version: FORMAT_VERSION,
         format_flags: FORMAT_FLAGS_V1_CORE,
-        reserved: 0,
+        document_count: index.document_count(),
         field_table_offset,
         lexicon_offset,
         postings_table_offset,
@@ -204,18 +202,18 @@ fn encode_lexicon(index: &InMemoryIndex) -> Result<Vec<u8>, IndexError> {
 /// The postings table entries MUST be in the same order as the lexicon entries.
 /// Both iterate in the order of `index.term_entries()` (by `TermId`).
 ///
-/// **Postings Table Layout (per `PostingsTableReader`, STORY-0002 AC-3):**
+/// **Postings Table Layout (per `PostingsTableReader`):**
 /// - Offset 0: count (`u32` LE)
 /// - Offset 4..: entries (20 bytes each):
 ///   - `postings_data_offset` (`u64`, offset 0): absolute offset within `postings_data` section
 ///   - `postings_data_len` (`u32`, offset 8): byte length of `postings_data` for this term
 ///   - `doc_freq` (`u32`, offset 12): number of documents containing this term (postings count)
-///   - `reserved_codec_id` (`u32`, offset 16): reserved for codec selection; 0 for v1-core
+///   - `reserved_codec_id` (`u32`, offset 16): reserved for codec selection; 0 for minimal v1
 ///
 /// **Postings Data Layout (per `PostingsDataReader`):**
 /// Raw bytes concatenated from all terms. Each term's postings are encoded as:
 /// - Postings for a term are stored as delta-encoded doc IDs followed by term frequencies.
-///   For v1-core, we use a simple uncompressed format: each posting is (`doc_id` `u32` + `term_freq` `u32`).
+///   For the current v1 format, we use a simple uncompressed format: each posting is (`doc_id` `u32` + `term_freq` `u32`).
 fn encode_postings(index: &InMemoryIndex) -> Result<(Vec<u8>, Vec<u8>), IndexError> {
     let mut table = Vec::new();
     let mut data = Vec::new();
@@ -251,7 +249,7 @@ fn encode_postings(index: &InMemoryIndex) -> Result<(Vec<u8>, Vec<u8>), IndexErr
         let doc_freq = u32::try_from(postings.len()).map_err(|_| IndexError::ValueOutOfRange)?;
 
         // Write postings table entry (20 bytes): offset (u64), len (u32), freq (u32), codec_id (u32).
-        // STORY-0002 AC-3: reserve codec_id field for per-term codec selection (ITER-0005).
+        // Reserve codec_id field for per-term codec selection in future releases.
         push_u64(&mut table, data_offset);
         push_u32(&mut table, data_len);
         push_u32(&mut table, doc_freq);
@@ -437,7 +435,7 @@ mod tests {
         assert!(header.lexicon_offset > header.field_table_offset);
         assert!(header.postings_table_offset > header.lexicon_offset);
         assert!(header.postings_data_offset > header.postings_table_offset);
-        // In v1-core, block_meta, stored_fields, columnar are all zero-length (same offset).
+        // In minimal v1, block_meta, stored_fields, columnar are all zero-length (same offset).
         assert_eq!(
             header.block_meta_offset, header.stored_fields_offset,
             "block_meta and stored_fields should have same offset (both zero-length)"
@@ -500,19 +498,19 @@ mod tests {
         // Each posting is 8 bytes; "hello" has 2 postings.
         assert_eq!(pdata_len, 16, "term 'hello' data_len should be 16 bytes");
         assert_eq!(doc_freq, 2, "term 'hello' has doc_freq=2");
-        assert_eq!(codec_id, 0, "reserved_codec_id should be 0 for v1-core");
+        assert_eq!(codec_id, 0, "reserved_codec_id should be 0 for minimal v1");
 
         // Postings table entry 1: term "world" with 1 posting (doc 0).
         let (_pdata_offset1, _pdata_len1, doc_freq1, codec_id1) =
             pt.entry(1).expect("postings entry 1 should exist");
         assert_eq!(doc_freq1, 1, "term 'world' has doc_freq=1");
-        assert_eq!(codec_id1, 0, "reserved_codec_id should be 0 for v1-core");
+        assert_eq!(codec_id1, 0, "reserved_codec_id should be 0 for minimal v1");
 
         // Postings table entry 2: term "rust" with 1 posting (doc 1).
         let (_pdata_offset2, _pdata_len2, doc_freq2, codec_id2) =
             pt.entry(2).expect("postings entry 2 should exist");
         assert_eq!(doc_freq2, 1, "term 'rust' has doc_freq=1");
-        assert_eq!(codec_id2, 0, "reserved_codec_id should be 0 for v1-core");
+        assert_eq!(codec_id2, 0, "reserved_codec_id should be 0 for minimal v1");
 
         // Read postings data.
         let pd = PostingsDataReader::new(
@@ -565,7 +563,7 @@ mod tests {
         );
     }
 
-    /// Test STORY-0002 AC-3: `postings_table` entries are 20 bytes with reserved `codec_id` slot.
+    /// Test: `postings_table` entries are 20 bytes with reserved `codec_id` slot.
     #[test]
     fn test_postings_table_entry_is_20_bytes_with_codec_id_slot() {
         let index = make_test_index();
@@ -617,6 +615,33 @@ mod tests {
         assert_eq!(
             codec_id_from_bytes, 0,
             "reserved_codec_id slot must exist at offset 16 in segment bytes"
+        );
+    }
+
+    /// Test that `document_count` is correctly written to and read from the segment header.
+    #[test]
+    fn test_document_count_roundtrip() {
+        let index = make_test_index();
+        let segment = write_segment(&index).expect("write_segment should succeed");
+        let header = SegmentHeader::read(&segment).expect("header should decode");
+
+        // The test index has 2 documents (with IDs 0 and 1)
+        assert_eq!(
+            header.document_count, 2,
+            "header document_count should be 2"
+        );
+
+        // Verify the document_count is at the correct byte offset [12..16)
+        let doc_count_bytes = &segment[12..16];
+        let doc_count_from_bytes = u32::from_le_bytes([
+            doc_count_bytes[0],
+            doc_count_bytes[1],
+            doc_count_bytes[2],
+            doc_count_bytes[3],
+        ]);
+        assert_eq!(
+            doc_count_from_bytes, 2,
+            "document_count bytes at [12..16) should encode 2"
         );
     }
 }

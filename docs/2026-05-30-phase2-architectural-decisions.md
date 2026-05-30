@@ -85,8 +85,9 @@ retrieval path, so they can lag without constraining v1. Reserving header slots 
 
 **Decision:** A **fixed-layout, little-endian POD header** (bytemuck `Pod`,
 alignment-1 byte-field layout consistent with the ID types) as the first bytes of the
-segment. Fields: `magic` (u32), `version` (u32), `format_flags` (u32), then the
-section offsets **`field_table_offset`, `lexicon_offset`, `postings_table_offset`,
+segment. Fields: `magic` (u32), `version` (u32), `format_flags` (u32),
+`document_count` (u32, total documents in this segment), then the section offsets
+**`field_table_offset`, `lexicon_offset`, `postings_table_offset`,
 `postings_data_offset`, `block_meta_offset`, `stored_fields_offset`,
 `columnar_offset`, `footer_offset` (all u64 LE, per DEC-01)**. **Offsets are absolute
 from segment start.**
@@ -417,13 +418,27 @@ direction; orphan rule satisfied — `leit_index` owns the cursor type, `leit_po
 **Evidence:** non-regression = all existing leit_index + integration tests stay green; ranking equivalence
 = SCENARIO-0026 (in-memory vs DeltaVarint vs BlockDelta cursor sources yield bit-identical top-k).
 
-## DEC-16 — Phase 1 segment format: REPLACE, not evolve/coexist (ITER-0004) — RESOLVED
+## DEC-16 — Phase 1 segment format: DEPRECATE (frozen shim), then remove later (ITER-0004) — REVISED
 
-**Decision:** The DEC-05 fixed-header v1 segment format **replaces** the pre-existing Phase 1
-directory-based segment format (`crates/leit_index/src/segment.rs`: `SegmentView`/`SectionKind`
-directory, u16 version, u32 offsets; writer `codec.rs::encode_segment` + `InMemoryIndex::to_segment_bytes`).
-No dual-path reader, no parallel v1/v2 coexistence. The Phase 1 round-trip tests
-(`crates/leit_index/tests/segment_roundtrip.rs`, the segment portion of
+**Revision (2026-05-30, user decision):** the original "delete in ITER-0004" stance below is SOFTENED to
+**deprecate, don't delete**. The Phase 1 directory format is merged, upstream-accepted code (PR #1); rather
+than remove it in this PR, it is kept as a **frozen, `#[deprecated]` shim** so external code still compiles
+(with a deprecation warning) and legacy bytes remain readable. Concretely in ITER-0004 T7:
+- The new DEC-05 view becomes the canonical `leit_index::SegmentView`; `InMemoryIndex::to_segment_bytes`
+  emits the new format.
+- The old directory reader is RENAMED to `DirectorySegmentView` and marked `#[deprecated]`; `SectionKind`
+  stays exported, `#[deprecated]`. Both remain able to read legacy directory-format bytes (frozen — no
+  further development). A minimal test keeps the shim exercised.
+- A future release removes the shim. Downstream (ITER-0005 mmap, ITER-0006 merge) builds ONLY on the new
+  format; the shim is not extended.
+This keeps maintenance cost low (a frozen deprecated reader ≠ an actively-maintained dual path) while
+respecting accepted upstream code. The ITER-0004 PR description must flag the deprecation for Bruce.
+
+**Original decision (superseded by the revision above):** The DEC-05 fixed-header v1 segment format
+**replaces** the pre-existing Phase 1 directory-based segment format (`crates/leit_index/src/segment.rs`:
+`SegmentView`/`SectionKind` directory, u16 version, u32 offsets; writer `codec.rs::encode_segment` +
+`InMemoryIndex::to_segment_bytes`). No dual-path reader, no parallel v1/v2 coexistence. The Phase 1
+round-trip tests (`crates/leit_index/tests/segment_roundtrip.rs`, the segment portion of
 `crates/leit_integration_tests/tests/phase1_readiness.rs`) are migrated to assert against the new format.
 
 **Rationale:** leit is pre-1.0 with no production segments in existence — the Phase 1 format is a
@@ -445,4 +460,6 @@ fill reserved slots without a header rewrite.
 
 **Verification:** ITER-0004 SCENARIO-0044 (write→read round-trip on the new format) + SCENARIO-0045
 (unknown-version clean rejection); the migrated Phase 1 tests stay green against the new format; the
-old directory-based code path is removed (no dead `SectionKind` directory reader remains).
+old directory format survives as a `#[deprecated] DirectorySegmentView` + `#[deprecated] SectionKind`
+shim with a retained test proving it still reads a legacy directory buffer (deprecation, not deletion,
+per the 2026-05-30 revision).

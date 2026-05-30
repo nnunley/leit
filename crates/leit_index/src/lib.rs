@@ -34,5 +34,14 @@ pub use error::{IndexError, SegmentError, ValidationMode};
 pub use leit_core::{FilterEvaluator, FilterSlotId, NoFilter};
 pub use memory::{InMemoryIndex, PostingEntry};
 pub use search::{ExecutionStats, ExecutionWorkspace, SearchScorer};
-pub use segment::{SectionKind, SegmentView};
-pub use segment_format::{FORMAT_VERSION, HEADER_SIZE, MAGIC, SegmentHeader};
+#[expect(
+    deprecated,
+    reason = "DirectorySegmentView is a deprecated Phase 1 artifact; kept for frozen compatibility"
+)]
+pub use segment::DirectorySegmentView;
+#[expect(
+    deprecated,
+    reason = "SectionKind is a deprecated Phase 1 artifact; kept for frozen compatibility"
+)]
+pub use segment::SectionKind;
+pub use segment_format::{FORMAT_VERSION, HEADER_SIZE, MAGIC, SegmentHeader, SegmentView};

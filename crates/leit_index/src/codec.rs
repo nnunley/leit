@@ -1,10 +1,26 @@
 // Copyright 2026 the Leit Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+#![expect(
+    deprecated,
+    reason = "codec.rs is a deprecated legacy directory-format artifact; retained only for compatibility"
+)]
+#![cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "encode_segment is the frozen legacy directory encoder; unused in the lib build (to_segment_bytes emits the new format) but exercised by the in-crate deprecated-shim test"
+    )
+)]
+
 use alloc::vec::Vec;
 
 use crate::error::IndexError;
 use crate::memory::InMemoryIndex;
+#[expect(
+    deprecated,
+    reason = "SectionKind is deprecated but still used in the legacy directory-format encoder"
+)]
 use crate::segment::{SectionKind, magic, version};
 
 pub(crate) fn encode_segment(index: &InMemoryIndex) -> Result<Vec<u8>, IndexError> {

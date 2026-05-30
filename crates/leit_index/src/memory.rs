@@ -17,10 +17,10 @@ use leit_postings::cursor::{
 use leit_query::{ExecutionPlan, FieldRegistry, QueryNode, QueryProgram, TermDictionary};
 use leit_text::FieldAnalyzers;
 
-use crate::codec::encode_segment;
 use crate::cursor::{CursorSource, MemPostingsCursor};
 use crate::error::IndexError;
 use crate::search::{ExecutionStats, FieldHit, SearchScorer};
+use crate::segment_format::writer::write_segment;
 
 pub(crate) const DEFAULT_POSTINGS_BLOCK_SIZE: usize = 2;
 
@@ -127,9 +127,9 @@ impl InMemoryIndex {
         }
     }
 
-    /// Serialize the current index into a single validated segment buffer.
+    /// Serialize the current index into a single validated segment buffer (Phase 2 DEC-05 format).
     pub fn to_segment_bytes(&self) -> Result<Vec<u8>, IndexError> {
-        encode_segment(self)
+        write_segment(self)
     }
 
     pub(crate) fn document_count(&self) -> u32 {

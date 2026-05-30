@@ -1,6 +1,16 @@
 // Copyright 2026 the Leit Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
+//! Index and segment error types.
+//!
+//! `SegmentError` retains a set of legacy directory-format variants that reference the deprecated
+//! `SectionKind`; the file-level expectation below covers those intentional references (the legacy
+//! directory reader is a frozen shim) without resorting to `#[allow]`.
+#![expect(
+    deprecated,
+    reason = "legacy directory-format SegmentError variants intentionally reference the deprecated SectionKind"
+)]
+
 use core::fmt;
 
 use leit_query::QueryError;
@@ -18,7 +28,7 @@ pub enum IndexError {
     MissingScorer,
     /// A size or offset does not fit in the on-disk format.
     ValueOutOfRange,
-    /// Structured filter predicates require columnar storage (Phase 3).
+    /// Structured filter predicates require columnar storage (a future extension).
     UnsupportedFilterPredicate,
     /// Query planning failed.
     Query(QueryError),
@@ -104,9 +114,9 @@ pub enum SegmentError {
         /// Segment buffer size limit.
         limit: u64,
     },
-    /// Section layout invalid: sections overlap or are mis-ordered (legacy Phase 1 format).
+    /// Section layout invalid: sections overlap or are mis-ordered (legacy directory format).
     BadSectionLayout,
-    /// Block metadata section malformed (reserved for ITER-0005).
+    /// Block metadata section malformed (reserved for future releases).
     InvalidBlockMeta,
     /// Footer checksum mismatch: expected `expected`, found `found`.
     BadChecksum {
@@ -116,22 +126,22 @@ pub enum SegmentError {
         found: u32,
     },
 
-    // Phase 1 legacy variants (replaced in Phase 2 but kept for backward compat)
-    /// The buffer does not start with the expected magic bytes. (LEGACY PHASE 1)
+    // Legacy directory-format variants (replaced but kept for backward compat)
+    /// The buffer does not start with the expected magic bytes. (LEGACY)
     InvalidMagic,
-    /// The fixed-size header was truncated. (LEGACY PHASE 1)
+    /// The fixed-size header was truncated. (LEGACY)
     TruncatedHeader,
-    /// The section directory was truncated. (LEGACY PHASE 1)
+    /// The section directory was truncated. (LEGACY)
     TruncatedDirectory,
-    /// A section kind in the directory is not known to this reader. (LEGACY PHASE 1)
+    /// A section kind in the directory is not known to this reader. (LEGACY)
     InvalidSectionKind(u32),
-    /// A section appears more than once. (LEGACY PHASE 1)
+    /// A section appears more than once. (LEGACY)
     DuplicateSection(SectionKind),
-    /// A required section is missing. (LEGACY PHASE 1)
+    /// A required section is missing. (LEGACY)
     MissingSection(SectionKind),
-    /// A section offset/length points outside the buffer. (LEGACY PHASE 1)
+    /// A section offset/length points outside the buffer. (LEGACY)
     OutOfBoundsSection(SectionKind),
-    /// Two declared sections overlap. (LEGACY PHASE 1)
+    /// Two declared sections overlap. (LEGACY)
     OverlappingSections {
         /// The first overlapping section.
         first: SectionKind,
@@ -170,7 +180,7 @@ impl fmt::Display for SegmentError {
                     "checksum mismatch: expected 0x{expected:08x}, found 0x{found:08x}"
                 )
             }
-            // Phase 1 legacy variants
+            // Legacy directory-format variants
             Self::InvalidMagic => write!(f, "invalid segment magic bytes"),
             Self::TruncatedHeader => write!(f, "truncated segment header"),
             Self::TruncatedDirectory => write!(f, "truncated section directory"),

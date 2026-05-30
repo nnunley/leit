@@ -1,13 +1,13 @@
 // Copyright 2026 the Leit Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Segment header: fixed-layout, little-endian POD (DEC-05, STORY-0038, STORY-0039).
+//! Segment header: fixed-layout, little-endian POD.
 //!
 //! The header is exactly 80 bytes and sits at offset 0 of every segment:
 //! - `magic`: u32 LE (4 bytes)
 //! - `version`: u32 LE (4 bytes)
 //! - `format_flags`: u32 LE (4 bytes)
-//! - `reserved`: u32 LE (4 bytes, for forward-compatibility headroom)
+//! - `document_count`: u32 LE (4 bytes, total number of documents in this segment)
 //! - `field_table_offset`: u64 LE (8 bytes)
 //! - `lexicon_offset`: u64 LE (8 bytes)
 //! - `postings_table_offset`: u64 LE (8 bytes)
@@ -24,11 +24,11 @@
 
 use crate::error::SegmentError;
 
-/// Magic constant identifying the DEC-05 v1 segment format.
+/// Magic constant identifying the v1 segment format.
 ///
-/// Deliberately DISTINCT from the legacy Phase 1 directory format's magic (`b"LSEG"`,
+/// Deliberately DISTINCT from the legacy directory format's magic (`b"LSEG"`,
 /// `0x4745534C`): a legacy segment fed to this reader must hit [`SegmentError::BadMagic`]
-/// (clean rejection → rebuild, per DEC-16 + STORY-0039 "never silent corruption"), not be
+/// (clean rejection → rebuild, never silent corruption), not be
 /// misread as a v1 header. Value is `b"LSG1"` (leit segment, format 1) in LE.
 pub const MAGIC: u32 = u32::from_le_bytes(*b"LSG1");
 
@@ -38,7 +38,7 @@ pub const FORMAT_VERSION: u32 = 1;
 /// Fixed serialized header size in bytes.
 pub const HEADER_SIZE: usize = 80;
 
-/// Segment header: fixed-layout, little-endian POD (DEC-05).
+/// Segment header: fixed-layout, little-endian POD.
 ///
 /// The header occupies exactly 80 bytes at offset 0 of every segment.
 /// All offsets are absolute from segment start (little-endian u64).
@@ -48,10 +48,10 @@ pub struct SegmentHeader {
     pub magic: u32,
     /// Format version (current: 1).
     pub version: u32,
-    /// Feature/optional-section flags (DEC-10).
+    /// Feature/optional-section flags.
     pub format_flags: u32,
-    /// Reserved for future use (forward-compat headroom).
-    pub reserved: u32,
+    /// Total number of documents in this segment.
+    pub document_count: u32,
     /// Absolute offset to field table section (or next section if `field_table_offset` is zero-length).
     pub field_table_offset: u64,
     /// Absolute offset to lexicon section (or next section if `lexicon_offset` is zero-length).
@@ -60,11 +60,11 @@ pub struct SegmentHeader {
     pub postings_table_offset: u64,
     /// Absolute offset to postings data blocks (or next section if zero-length).
     pub postings_data_offset: u64,
-    /// Absolute offset to block metadata section (reserved, may be zero-length in v1-core).
+    /// Absolute offset to block metadata section (reserved, may be zero-length in minimal v1).
     pub block_meta_offset: u64,
-    /// Absolute offset to stored fields section (optional, reserved for Phase 3).
+    /// Absolute offset to stored fields section (optional, reserved for future extensions).
     pub stored_fields_offset: u64,
-    /// Absolute offset to columnar section (optional, reserved for Phase 3).
+    /// Absolute offset to columnar section (optional, reserved for future extensions).
     pub columnar_offset: u64,
     /// Absolute offset to footer (checksum, reserved, may be zero-length in minimal v1).
     pub footer_offset: u64,
@@ -87,8 +87,8 @@ impl SegmentHeader {
         // Offsets 8-11: format_flags (u32 LE)
         buf[8..12].copy_from_slice(&self.format_flags.to_le_bytes());
 
-        // Offsets 12-15: reserved (u32 LE)
-        buf[12..16].copy_from_slice(&self.reserved.to_le_bytes());
+        // Offsets 12-15: document_count (u32 LE)
+        buf[12..16].copy_from_slice(&self.document_count.to_le_bytes());
 
         // Offsets 16-23: field_table_offset (u64 LE)
         buf[16..24].copy_from_slice(&self.field_table_offset.to_le_bytes());
@@ -160,8 +160,8 @@ impl SegmentHeader {
         // Read format_flags at offset 8-11
         let format_flags = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
 
-        // Read reserved at offset 12-15
-        let reserved = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+        // Read document_count at offset 12-15
+        let document_count = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
 
         // Read field_table_offset at offset 16-23
         let field_table_offset = u64::from_le_bytes([
@@ -207,7 +207,7 @@ impl SegmentHeader {
             magic,
             version,
             format_flags,
-            reserved,
+            document_count,
             field_table_offset,
             lexicon_offset,
             postings_table_offset,
@@ -219,7 +219,7 @@ impl SegmentHeader {
         })
     }
 
-    /// Validate section layout consistency per STORY-0038 AC-3.
+    /// Validate section layout: offsets in-bounds, ordered, with reserved zero-length sections allowed.
     ///
     /// Rules:
     /// - All offsets must be <= `buffer_len` (no offset beyond segment)
@@ -328,7 +328,7 @@ mod tests {
             magic: MAGIC,
             version: FORMAT_VERSION,
             format_flags: 0,
-            reserved: 0,
+            document_count: 0,
             field_table_offset: 80,
             lexicon_offset: 200,
             postings_table_offset: 400,
@@ -352,7 +352,7 @@ mod tests {
             magic: MAGIC,
             version: FORMAT_VERSION,
             format_flags: 0,
-            reserved: 0,
+            document_count: 0,
             field_table_offset: 80,
             lexicon_offset: 200,
             postings_table_offset: 400,
@@ -395,9 +395,9 @@ mod tests {
 
     #[test]
     fn rejects_legacy_lseg_magic() {
-        // A legacy Phase 1 segment begins with b"LSEG" and version=1 (which decodes to
+        // A legacy segment begins with b"LSEG" and version=1 (which decodes to
         // u32 1 in the new header's version slot). With a DISTINCT v1 magic, such a buffer
-        // is cleanly rejected at the magic check (DEC-16 + STORY-0039: never silent corruption)
+        // is cleanly rejected at the magic check (never silent corruption)
         // rather than being misread as a v1 header.
         let legacy_magic = u32::from_le_bytes(*b"LSEG");
         let mut buf = [0_u8; HEADER_SIZE];
@@ -433,7 +433,7 @@ mod tests {
             magic: MAGIC,
             version: FORMAT_VERSION,
             format_flags: 0,
-            reserved: 0,
+            document_count: 0,
             field_table_offset: 80,
             lexicon_offset: 200,
             postings_table_offset: 400,
@@ -460,7 +460,7 @@ mod tests {
             magic: MAGIC,
             version: FORMAT_VERSION,
             format_flags: 0,
-            reserved: 0,
+            document_count: 0,
             field_table_offset: 200, // Out of order
             lexicon_offset: 80,
             postings_table_offset: 400,
@@ -481,7 +481,7 @@ mod tests {
             magic: MAGIC,
             version: FORMAT_VERSION,
             format_flags: 0,
-            reserved: 0,
+            document_count: 0,
             field_table_offset: 80,
             lexicon_offset: 200,
             postings_table_offset: 400,
@@ -502,7 +502,7 @@ mod tests {
             magic: MAGIC,
             version: FORMAT_VERSION,
             format_flags: 0,
-            reserved: 0,
+            document_count: 0,
             field_table_offset: 80,
             lexicon_offset: 200,
             postings_table_offset: 200, // Zero-length (== previous)
@@ -523,7 +523,7 @@ mod tests {
             magic: MAGIC,
             version: FORMAT_VERSION,
             format_flags: 0,
-            reserved: 0,
+            document_count: 0,
             field_table_offset: 80,
             lexicon_offset: 200,
             postings_table_offset: 400,
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn rejects_unknown_version() {
-        // SCENARIO-0045: Reader cleanly rejects segment with unknown version
+        // Reader cleanly rejects segment with unknown version
         let mut buf = [0_u8; HEADER_SIZE];
         buf[0..4].copy_from_slice(&MAGIC.to_le_bytes());
         buf[4..8].copy_from_slice(&99_u32.to_le_bytes()); // Version 99

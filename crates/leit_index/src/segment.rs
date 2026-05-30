@@ -22,9 +22,16 @@ impl SectionRef {
     }
 }
 
-/// Known section kinds in the Phase 1 segment format.
+/// Known section kinds in the legacy directory segment format.
+///
+/// This enum is deprecated; it remains frozen for compatibility with legacy
+/// directory-format segments. New code should use the current `SegmentView` instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
+#[deprecated(
+    since = "0.2.0",
+    note = "use the new fixed-header segment view; the directory format is frozen and will be removed in a future release"
+)]
 pub enum SectionKind {
     /// Field-aware term dictionary entries.
     TermDictionary = 1,
@@ -36,6 +43,10 @@ pub enum SectionKind {
     PostingsPayload = 4,
 }
 
+#[expect(
+    deprecated,
+    reason = "SectionKind impl is part of deprecated legacy directory-format shim"
+)]
 impl SectionKind {
     const ALL: [Self; 4] = [
         Self::TermDictionary,
@@ -68,9 +79,18 @@ impl SectionKind {
     }
 }
 
-/// A validated borrowed view over a serialized segment buffer.
+/// A validated borrowed view over a serialized segment buffer (legacy directory format).
+///
+/// This struct is deprecated; it remains frozen for compatibility with legacy
+/// directory-format segments. New code should use the current `SegmentView` instead.
+///
+/// The directory format is no longer actively developed and will be removed in a future release.
 #[derive(Clone, Debug)]
-pub struct SegmentView<'a> {
+#[deprecated(
+    since = "0.2.0",
+    note = "use the new fixed-header segment view; the directory format is frozen and will be removed in a future release"
+)]
+pub struct DirectorySegmentView<'a> {
     bytes: &'a [u8],
     document_count: u32,
     term_count: u32,
@@ -78,7 +98,11 @@ pub struct SegmentView<'a> {
     sections: [Option<SectionRef>; 4],
 }
 
-impl<'a> SegmentView<'a> {
+#[expect(
+    deprecated,
+    reason = "DirectorySegmentView impl uses its own deprecated struct"
+)]
+impl<'a> DirectorySegmentView<'a> {
     /// Open and validate a borrowed segment buffer.
     pub fn open(bytes: &'a [u8]) -> Result<Self, SegmentError> {
         if bytes.len() < HEADER_LEN {
@@ -233,4 +257,53 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, SegmentError> {
 
 const fn ranges_overlap(a: Range<usize>, b: Range<usize>) -> bool {
     a.start < b.end && b.start < a.end
+}
+
+#[cfg(test)]
+mod deprecated_shim_tests {
+    //! Keeps the frozen legacy directory-format reader (`DirectorySegmentView`) exercised:
+    //! it must still read a legacy directory buffer produced by the legacy `encode_segment`.
+    #![expect(
+        deprecated,
+        reason = "intentionally exercises the deprecated legacy directory-format shim"
+    )]
+
+    use super::{DirectorySegmentView, SectionKind};
+    use crate::InMemoryIndexBuilder;
+    use crate::codec::encode_segment;
+    use leit_core::FieldId;
+    use leit_text::{Analyzer, FieldAnalyzers, UnicodeNormalizer, WhitespaceTokenizer};
+
+    fn analyzers() -> FieldAnalyzers {
+        let mut a = FieldAnalyzers::new();
+        a.set(
+            FieldId::new(1),
+            Analyzer::new(WhitespaceTokenizer::new()).with_normalizer(UnicodeNormalizer::new()),
+        );
+        a
+    }
+
+    #[test]
+    fn directory_segment_view_reads_legacy_buffer() {
+        let mut builder = InMemoryIndexBuilder::new(analyzers());
+        builder
+            .index_document(1, &[(FieldId::new(1), "legacy rust")])
+            .expect("doc 1 indexes");
+        builder
+            .index_document(2, &[(FieldId::new(1), "legacy systems")])
+            .expect("doc 2 indexes");
+        let index = builder.build_index();
+
+        // Legacy directory-format bytes (the frozen legacy encoder).
+        let legacy = encode_segment(&index).expect("legacy encode should succeed");
+
+        // The deprecated directory reader still parses them.
+        let view =
+            DirectorySegmentView::open(&legacy).expect("directory view should open legacy bytes");
+        assert_eq!(view.document_count(), 2);
+        assert_eq!(view.field_count(), 1);
+        assert!(view.term_count() >= 2);
+        assert!(view.has_section(SectionKind::TermDictionary));
+        assert!(view.has_section(SectionKind::PostingsPayload));
+    }
 }

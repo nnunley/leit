@@ -1,23 +1,15 @@
 // Copyright 2026 the Leit Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Borrowed segment view: fully-borrowed, zero-copy access to segment sections (DEC-08).
+//! Borrowed segment view: fully-borrowed, zero-copy access to segment sections.
 //!
 //! `SegmentView<'a>` validates a segment buffer and provides lifetime-safe accessors to each
 //! section (field table, lexicon, postings table, postings data, block metadata) as borrowed readers.
 //! Three validation modes (`HeaderOnly`, `Structural`, `Full`) provide a tradeoff between startup latency
-//! and error detection (DEC-07, STORY-0026, STORY-0082).
+//! and error detection.
 //!
-//! The view is `pub(crate)` for now; T7 will promote it to `pub` and flip the lib.rs re-export
-//! to avoid naming collision with the legacy Phase 1 `SegmentView`.
-
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "SegmentView is pub(crate)/test-only until T7 promotes it to pub and flips the lib.rs re-export"
-    )
-)]
+//! The view is the canonical public API for the current format; the legacy directory reader
+//! is deprecated and frozen as `DirectorySegmentView`.
 
 use crate::error::{SegmentError, ValidationMode};
 
@@ -27,7 +19,7 @@ use super::readers::{
     BlockMetadataReader, FieldTableReader, LexiconReader, PostingsDataReader, PostingsTableReader,
 };
 
-/// A fully-borrowed, zero-copy view of a segment buffer (DEC-08).
+/// A fully-borrowed, zero-copy view of a segment buffer.
 ///
 /// Holds a parsed `SegmentHeader` and a reference to the original buffer.
 /// Section readers are constructed on-demand from validated offsets, borrowing directly
@@ -35,13 +27,20 @@ use super::readers::{
 ///
 /// Lifetime `'a` ties the view to the buffer lifetime, preventing use-after-free.
 ///
-/// `pub(crate)` for now; will be promoted to `pub` in T7.
+/// This is the canonical segment view for the current format.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct SegmentView<'a> {
+pub struct SegmentView<'a> {
     buffer: &'a [u8],
     header: SegmentHeader,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "crate-internal section accessors are unused in the lib build until segment queries are wired"
+    )
+)]
 impl<'a> SegmentView<'a> {
     /// Open a segment using the default (Structural) validation mode.
     ///
@@ -52,23 +51,23 @@ impl<'a> SegmentView<'a> {
     ///
     /// # Returns
     /// `Ok(SegmentView)` if validation succeeds, or `SegmentError` if failed.
-    pub(crate) fn open(bytes: &'a [u8]) -> Result<Self, SegmentError> {
+    pub fn open(bytes: &'a [u8]) -> Result<Self, SegmentError> {
         Self::open_with_validation(bytes, ValidationMode::Structural)
     }
 
     /// Open a segment with explicit validation mode (`HeaderOnly`, `Structural`, or `Full`).
     ///
-    /// # Validation modes (per DEC-07 + STORY-0026):
+    /// # Validation modes:
     ///
     /// - **`HeaderOnly`:** Validate magic bytes and version only. Does NOT traverse sections or
     ///   validate offsets. A buffer with a valid header but truncated/garbage body will open
-    ///   successfully (STORY-0026 AC-5). Cheapest open.
+    ///   successfully. Cheapest open.
     ///
     /// - **Structural (default):** `HeaderOnly` + validate all offsets are in-bounds and sections
-    ///   are ordered/non-overlapping via `header.validate_layout()` (STORY-0026 AC-4).
+    ///   are ordered/non-overlapping via `header.validate_layout()`.
     ///   Safe and fast for most use cases.
     ///
-    /// - **Full:** Structural + footer checksum validation via `Footer::verify()` (STORY-0026 AC-6).
+    /// - **Full:** Structural + footer checksum validation via `Footer::verify()`.
     ///   Detects corruption in the covered byte range [0, `footer_offset`).
     ///
     /// # Arguments
@@ -85,7 +84,7 @@ impl<'a> SegmentView<'a> {
     /// - `SegmentError::BadOffset` if offsets are out of bounds (Structural/Full only)
     /// - `SegmentError::BadSectionLayout` if sections are misordered (Structural/Full only)
     /// - `SegmentError::BadChecksum` if footer checksum fails (Full only)
-    pub(crate) fn open_with_validation(
+    pub fn open_with_validation(
         bytes: &'a [u8],
         mode: ValidationMode,
     ) -> Result<Self, SegmentError> {
@@ -112,13 +111,6 @@ impl<'a> SegmentView<'a> {
     ///
     /// Constructs a `FieldTableReader` from the validated offset range
     /// [`field_table_offset`, `lexicon_offset`). No copying; the reader borrows directly from the buffer.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "lib-wired + promoted to pub in T7; exercised by tests now"
-        )
-    )]
     pub(crate) fn field_table(&self) -> Result<FieldTableReader<'a>, SegmentError> {
         FieldTableReader::new(
             self.buffer,
@@ -131,13 +123,6 @@ impl<'a> SegmentView<'a> {
     ///
     /// Constructs a `LexiconReader` from the validated offset range
     /// [`lexicon_offset`, `postings_table_offset`). No copying; the reader borrows directly from the buffer.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "lib-wired + promoted to pub in T7; exercised by tests now"
-        )
-    )]
     pub(crate) fn lexicon(&self) -> Result<LexiconReader<'a>, SegmentError> {
         LexiconReader::new(
             self.buffer,
@@ -150,13 +135,6 @@ impl<'a> SegmentView<'a> {
     ///
     /// Constructs a `PostingsTableReader` from the validated offset range
     /// [`postings_table_offset`, `postings_data_offset`). No copying; the reader borrows directly from the buffer.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "lib-wired + promoted to pub in T7; exercised by tests now"
-        )
-    )]
     pub(crate) fn postings_table(&self) -> Result<PostingsTableReader<'a>, SegmentError> {
         PostingsTableReader::new(
             self.buffer,
@@ -169,13 +147,6 @@ impl<'a> SegmentView<'a> {
     ///
     /// Constructs a `PostingsDataReader` from the validated offset range
     /// [`postings_data_offset`, `block_meta_offset`). No copying; the reader borrows directly from the buffer.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "lib-wired + promoted to pub in T7; exercised by tests now"
-        )
-    )]
     pub(crate) fn postings_data(&self) -> Result<PostingsDataReader<'a>, SegmentError> {
         PostingsDataReader::new(
             self.buffer,
@@ -184,24 +155,25 @@ impl<'a> SegmentView<'a> {
         )
     }
 
-    /// Access the block metadata section as a borrowed reader (reserved for ITER-0005).
+    /// Access the block metadata section as a borrowed reader (reserved for future releases).
     ///
     /// Constructs a `BlockMetadataReader` from the validated offset range
-    /// [`block_meta_offset`, `stored_fields_offset`). In v1-core, this section is zero-length.
+    /// [`block_meta_offset`, `stored_fields_offset`). In the current format, this section is zero-length.
     /// No copying; the reader borrows directly from the buffer.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "lib-wired + promoted to pub in T7; exercised by tests now"
-        )
-    )]
     pub(crate) fn block_meta(&self) -> Result<BlockMetadataReader<'a>, SegmentError> {
         BlockMetadataReader::new(
             self.buffer,
             self.header.block_meta_offset,
             self.header.stored_fields_offset,
         )
+    }
+
+    /// Returns the total number of documents in this segment.
+    ///
+    /// This value is stored in the segment header and represents the count of unique document IDs
+    /// that were indexed into this segment.
+    pub fn document_count(&self) -> u32 {
+        self.header.document_count
     }
 }
 
