@@ -30,6 +30,6 @@ mod segment;
 pub use builder::{InMemoryIndexBuilder, IndexBuilder};
 pub use error::{IndexError, SegmentError};
 pub use leit_core::{FilterEvaluator, FilterSlotId, NoFilter};
-pub use memory::InMemoryIndex;
+pub use memory::{InMemoryIndex, PostingEntry};
 pub use search::{ExecutionStats, ExecutionWorkspace, SearchScorer};
 pub use segment::{SectionKind, SegmentView};

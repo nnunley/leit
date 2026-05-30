@@ -20,11 +20,16 @@ bench = false
 criterion = { workspace = true }
 leit_core = { features = ["std"], workspace = true }
 leit_index = { features = ["std"], workspace = true }
+leit_postings = { features = ["std"], workspace = true }
 leit_text = { features = ["std"], workspace = true }
 leit_wind_tunnel = { workspace = true }
 
 [[bench]]
 name = "indexing"
+harness = false
+
+[[bench]]
+name = "codec_compare"
 harness = false
 
 [lints]

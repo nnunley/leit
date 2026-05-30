@@ -24,10 +24,16 @@ pub(crate) struct TermEntry {
     pub(crate) term: String,
 }
 
+/// A single posting: a document ID and its term frequency for a term.
+///
+/// Postings are aggregated per term and stored in doc-sorted order (ascending doc ID).
+/// This type is public primarily for codec benchmarking and analysis.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct PostingEntry {
-    pub(crate) doc_id: u32,
-    pub(crate) term_freq: u32,
+pub struct PostingEntry {
+    /// Document identifier (segment-local, u32).
+    pub doc_id: u32,
+    /// Term frequency (raw count of term occurrences in the document's field).
+    pub term_freq: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -132,6 +138,14 @@ impl InMemoryIndex {
     }
 
     pub(crate) const fn postings(&self) -> &BTreeMap<TermId, Vec<PostingEntry>> {
+        &self.postings
+    }
+
+    /// Return all postings indexed by term ID.
+    ///
+    /// Postings are doc-sorted (ascending doc ID) within each term's list.
+    /// This method is primarily used for codec benchmarking and analysis.
+    pub fn postings_by_term(&self) -> &BTreeMap<TermId, Vec<PostingEntry>> {
         &self.postings
     }
 
