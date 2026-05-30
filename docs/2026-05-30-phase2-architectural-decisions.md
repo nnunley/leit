@@ -327,3 +327,54 @@ scratch-ownership-agnostic so that decision is not boxed in here.
 
 **Decided in ITER-0002 against the ITER-0000 wind-tunnel baseline; enforced by the codec
 implementation (SCENARIO-0006 round-trip) and measured by SCENARIO-0070 (codec comparison).**
+
+## DEC-13 — Decode-scratch ownership model (STORY-0079, STORY-0089) — RESOLVED
+
+**Decision:** **Workspace-borrowed** decode scratch. A `DecodeScratch { docs: Vec<SegmentLocalDocId>,
+tfs: Vec<TermFreq> }` is owned by the *caller* (the query workspace / executor) and passed into cursor
+construction by `&'a mut DecodeScratch`. A cursor borrows the scratch for its lifetime, decodes the
+codec payload into it, and steps over it. The scratch is `clear()`ed (length reset, **capacity
+retained**) and reused across sequential cursors, so steady-state traversal performs **zero heap
+allocation** on the hot path.
+
+**Rejected alternatives:**
+- *Cursor-owned* (each cursor allocates its own `Vec`s): simplest lifetimes, but allocates per cursor —
+  fails the zero-alloc hot-path target (STORY-0016) when a query opens many term cursors.
+- *Pooled / thread-local*: best amortization but needs `std` (thread locals) or an allocator-coupled
+  pool; violates `no_std` and adds reuse-complexity that the borrowed model already buys.
+
+**Rationale:** the borrowed model gives explicit, compiler-checked lifetimes (no stale pointers,
+no use-after-free — the scratch outlives every cursor that borrows it), is `no_std`+`alloc`-only, and
+matches the scratch-ownership-agnostic codec decode API (DEC-12) — the codec already writes into
+caller-provided `&mut Vec<…>` buffers, so `DecodeScratch` is exactly those two buffers behind a named
+type. This **resolves the `TODO(ITER-0003)` at `codec.rs:153`**: the wrapper is `DecodeScratch`, owned
+by the workspace, borrowed by cursors.
+
+**Validation:** SCENARIO-0019 / SCENARIO-0024 — drive N sequential cursors over distinct postings views
+through one `&mut DecodeScratch` and assert buffer **capacity is stable after warm-up** (no realloc),
+i.e. allocation count matches the zero-per-cursor profile. `no_std`-friendly (capacity-stability proxy
+for an allocation counter). Decided in ITER-0003 against the ITER-0000 wind-tunnel baseline.
+
+## DEC-14 — TF / positions / payloads cursor capability: layered (STORY-0080) — RESOLVED
+
+**Decision:** **Layered** cursor capabilities, not a unified trait. `DocCursor` (doc traversal:
+`current_doc`, `advance`, `advance_to`) is the base; `TfCursor: DocCursor` adds `current_tf`;
+`BlockCursor: DocCursor` adds block-summary access (`block_end_doc`, `block_max_score`). **Positions and
+payloads are NOT in v1** — the v1 codec carries no positions (DEC-12). A future `PositionCursor: TfCursor`
+is the reserved extension point; adding it does not change `DocCursor`/`TfCursor` callers.
+
+**Rejected alternative:** a single unified `Cursor` trait exposing `tf()`, `positions()`, `payload()`
+with `Option`/sentinel returns. Rejected because it forces every cursor (including a doc-only cursor that
+should skip the TF stream entirely via `doc_bytes_len`, DEC-12) to carry capability it does not provide,
+and pushes capability checks to runtime instead of the type system.
+
+**Rationale:** layering keeps the simple/hot path (doc-only and doc+tf traversal) lean and
+allocation-free, lets a scorer request exactly the capability it needs at the type level, and aligns with
+the existing thin trait stack already in `leit_postings` (which this iteration evolves to the canonical
+`advance_to`/`CursorStatus` API). Allocation-free guarantee: none of the layered methods allocate; only
+`DecodeScratch` may grow, and only if a block exceeds current capacity (DEC-13).
+
+**Validation:** crate-internal cursor integration tests exercise `DocCursor`/`TfCursor` over all
+cursor-traversal query shapes (single / OR / AND / fielded / BM25F operands). Full *wired index*
+query-path confirmation is subsumed by ITER-0003B's ranking-equivalence proof (SCENARIO-0026). Decided in
+ITER-0003.
