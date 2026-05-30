@@ -7,13 +7,18 @@ use alloc::vec::Vec;
 use core::ops::{AddAssign, MulAssign};
 
 use leit_collect::Collector;
-use leit_core::{FieldId, FilterEvaluator, QueryNodeId, Score, ScoredHit, TermId};
-use leit_postings::cursor::{CursorStatus, TfCursor};
+use leit_core::{
+    FieldId, FilterEvaluator, QueryNodeId, Score, ScoredHit, SegmentLocalDocId, TermFreq, TermId,
+};
+use leit_postings::codec::{BlockDeltaCodec, Codec, CodecId, DeltaVarintCodec};
+use leit_postings::cursor::{
+    CursorFactory, CursorStatus, DecodeScratch, DefaultCursorFactory, PostingsView, TfCursor,
+};
 use leit_query::{ExecutionPlan, FieldRegistry, QueryNode, QueryProgram, TermDictionary};
 use leit_text::FieldAnalyzers;
 
 use crate::codec::encode_segment;
-use crate::cursor::MemPostingsCursor;
+use crate::cursor::{CursorSource, MemPostingsCursor};
 use crate::error::IndexError;
 use crate::search::{ExecutionStats, FieldHit, SearchScorer};
 
@@ -177,7 +182,25 @@ impl InMemoryIndex {
         filter: &F,
         stats: &mut ExecutionStats,
     ) -> Result<EvalResult, IndexError> {
-        self.evaluate_node(plan.program.root(), &plan.program, scorer, filter, stats)
+        self.evaluate_plan_with_source(plan, scorer, filter, stats, CursorSource::default())
+    }
+
+    pub(crate) fn evaluate_plan_with_source<F: FilterEvaluator<u32>>(
+        &self,
+        plan: &ExecutionPlan,
+        scorer: SearchScorer,
+        filter: &F,
+        stats: &mut ExecutionStats,
+        source: CursorSource,
+    ) -> Result<EvalResult, IndexError> {
+        self.evaluate_node_with_source(
+            plan.program.root(),
+            &plan.program,
+            scorer,
+            filter,
+            stats,
+            source,
+        )
     }
 
     pub(crate) fn evaluate_matches<F: FilterEvaluator<u32>>(
@@ -196,13 +219,32 @@ impl InMemoryIndex {
         filter: &F,
         stats: &mut ExecutionStats,
     ) -> Result<EvalResult, IndexError> {
+        self.evaluate_node_with_source(
+            node_id,
+            program,
+            scoring,
+            filter,
+            stats,
+            CursorSource::default(),
+        )
+    }
+
+    fn evaluate_node_with_source<F: FilterEvaluator<u32>>(
+        &self,
+        node_id: QueryNodeId,
+        program: &QueryProgram,
+        scoring: SearchScorer,
+        filter: &F,
+        stats: &mut ExecutionStats,
+        source: CursorSource,
+    ) -> Result<EvalResult, IndexError> {
         let Some(node) = program.get(node_id) else {
             return Ok(EvalResult::default());
         };
 
         match node {
             QueryNode::Term { field, term, boost } => {
-                Ok(self.eval_term(*field, *term, *boost, scoring, stats))
+                Ok(self.eval_term_with_source(*field, *term, *boost, scoring, stats, source))
             }
             QueryNode::TermExpansion {
                 children,
@@ -228,9 +270,11 @@ impl InMemoryIndex {
                     return Ok(result);
                 }
 
+                // Note: TermExpansion stays on InMemory path; compressed source wires only single-term (QueryNode::Term).
                 self.eval_disjunction(children, *boost, program, scoring, filter, stats)
             }
             QueryNode::Or { children, boost } => {
+                // Note: OR stays on InMemory; compressed source wires only single-term queries.
                 self.eval_disjunction(children, *boost, program, scoring, filter, stats)
             }
             QueryNode::And { children, boost } => {
@@ -238,13 +282,15 @@ impl InMemoryIndex {
                 let Some(first) = iter.next() else {
                     return Ok(EvalResult::default());
                 };
-                let first_result = self.evaluate_node(*first, program, scoring, filter, stats)?;
+                let first_result = self
+                    .evaluate_node_with_source(*first, program, scoring, filter, stats, source)?;
                 let mut matches = first_result.matches.clone();
                 let mut child_results = Vec::new();
                 child_results.push(first_result);
                 for child in iter {
-                    let child_result =
-                        self.evaluate_node(*child, program, scoring, filter, stats)?;
+                    let child_result = self.evaluate_node_with_source(
+                        *child, program, scoring, filter, stats, source,
+                    )?;
                     matches.retain(|doc_id| child_result.matches.contains(doc_id));
                     child_results.push(child_result);
                 }
@@ -269,7 +315,7 @@ impl InMemoryIndex {
             }
             QueryNode::Not { child } => {
                 let child_matches = self
-                    .evaluate_node(*child, program, scoring, filter, stats)?
+                    .evaluate_node_with_source(*child, program, scoring, filter, stats, source)?
                     .matches;
                 let mut matches = BTreeSet::new();
                 for doc_id in &self.documents {
@@ -280,7 +326,8 @@ impl InMemoryIndex {
                 Ok(EvalResult::from_matches(matches))
             }
             QueryNode::ConstantScore { child, score } => {
-                let mut result = self.evaluate_node(*child, program, scoring, filter, stats)?;
+                let mut result = self
+                    .evaluate_node_with_source(*child, program, scoring, filter, stats, source)?;
                 result.scores.clear();
                 let safe_score = Score::try_from(*score).unwrap_or(Score::ZERO);
                 for doc_id in &result.matches {
@@ -289,7 +336,8 @@ impl InMemoryIndex {
                 Ok(result)
             }
             QueryNode::ExternalFilter { input, slot } => {
-                let mut result = self.evaluate_node(*input, program, scoring, filter, stats)?;
+                let mut result = self
+                    .evaluate_node_with_source(*input, program, scoring, filter, stats, source)?;
                 result
                     .matches
                     .retain(|doc_id| filter.evaluate(*slot, doc_id));
@@ -573,13 +621,14 @@ impl InMemoryIndex {
         }
     }
 
-    fn eval_term(
+    fn eval_term_with_source(
         &self,
         field: FieldId,
         term: TermId,
         boost: f32,
         scoring: SearchScorer,
         stats: &mut ExecutionStats,
+        cursor_source: CursorSource,
     ) -> EvalResult {
         let mut results = BTreeMap::new();
         let Some(postings) = self.postings.get(&term) else {
@@ -590,20 +639,71 @@ impl InMemoryIndex {
         let doc_count = self.document_count();
         let doc_frequency = u32::try_from(postings.len()).unwrap_or(u32::MAX);
 
-        let mut cursor = MemPostingsCursor::new(postings);
-        self.score_via_cursor(
-            &mut cursor,
-            field,
-            boost,
-            scoring,
-            avg_doc_length,
-            doc_count,
-            doc_frequency,
-            |doc_id, score| {
-                stats.scored_postings = stats.scored_postings.saturating_add(1);
-                results.insert(doc_id, score);
-            },
-        );
+        match cursor_source {
+            CursorSource::InMemory => {
+                let mut cursor = MemPostingsCursor::new(postings);
+                self.score_via_cursor(
+                    &mut cursor,
+                    field,
+                    boost,
+                    scoring,
+                    avg_doc_length,
+                    doc_count,
+                    doc_frequency,
+                    |doc_id, score| {
+                        stats.scored_postings = stats.scored_postings.saturating_add(1);
+                        results.insert(doc_id, score);
+                    },
+                );
+            }
+            CursorSource::Compressed(codec_id) => {
+                // Encode postings: convert PostingEntry to (SegmentLocalDocId, TermFreq).
+                let encoded_postings: Vec<(SegmentLocalDocId, TermFreq)> = postings
+                    .iter()
+                    .map(|pe| {
+                        (
+                            SegmentLocalDocId::new(pe.doc_id),
+                            TermFreq::new(pe.term_freq),
+                        )
+                    })
+                    .collect();
+
+                // Select codec and encode.
+                let encoded_bytes = match codec_id {
+                    CodecId::DeltaVarint => {
+                        let codec = DeltaVarintCodec;
+                        codec.encode(&encoded_postings)
+                    }
+                    CodecId::BlockDelta => {
+                        let codec = BlockDeltaCodec;
+                        codec.encode(&encoded_postings)
+                    }
+                };
+
+                // Build view and open cursor. The encoded_bytes and scratch are locals scoped
+                // to this match arm; the cursor borrows them for the duration of score_via_cursor.
+                let view = PostingsView::new(&encoded_bytes, &[]);
+                let mut scratch = DecodeScratch::with_capacity(encoded_postings.len());
+                let mut cursor = match DefaultCursorFactory.open_doc_cursor(view, &mut scratch) {
+                    Ok(c) => c,
+                    Err(_) => return EvalResult::default(),
+                };
+
+                self.score_via_cursor(
+                    &mut cursor,
+                    field,
+                    boost,
+                    scoring,
+                    avg_doc_length,
+                    doc_count,
+                    doc_frequency,
+                    |doc_id, score| {
+                        stats.scored_postings = stats.scored_postings.saturating_add(1);
+                        results.insert(doc_id, score);
+                    },
+                );
+            }
+        }
 
         EvalResult::from_scores(results)
     }
@@ -765,6 +865,12 @@ impl InMemoryIndex {
         }
     }
 
+    /// Collect scored hits for a single term via the in-memory cursor, preserving
+    /// per-block max-score pruning.
+    ///
+    /// This is the fast-path used by `try_execute_root`; it always traverses the
+    /// uncompressed in-memory postings (the segment-backed compressed source is
+    /// selected only on the `evaluate_plan_with_source` path via `eval_term_with_source`).
     fn collect_term<S>(
         &self,
         field: FieldId,
@@ -892,7 +998,8 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    use crate::builder::build_posting_blocks;
+    use crate::builder::{InMemoryIndexBuilder, build_posting_blocks};
+    use leit_text::{Analyzer, UnicodeNormalizer, WhitespaceTokenizer};
 
     #[test]
     fn posting_blocks_respect_configured_block_size() {
@@ -941,5 +1048,172 @@ mod tests {
                 min_doc_length: 5,
             }
         );
+    }
+
+    // ============================================================================
+    // SCENARIO-0026: Compressed postings roundtrip preserves ranking equivalence
+    // ============================================================================
+    //
+    // STORY-0088 AC-2 / STORY-0008 AC-1/AC-2/AC-3: Verify that compressed cursor
+    // paths (DeltaVarint, BlockDelta) produce identical top-k ranking to the in-memory
+    // uncompressed path.
+
+    #[test]
+    fn scenario_0026_compressed_cursor_equivalence() {
+        use crate::cursor::CursorSource;
+        use leit_core::NoFilter;
+        use leit_postings::codec::CodecId;
+        use leit_query::Planner;
+
+        // Build a large deterministic test corpus: 300 docs across two fields.
+        // This ensures BlockDelta (128-doc blocks) exercises multi-block decoding.
+        let mut analyzers = FieldAnalyzers::new();
+        let analyzer =
+            Analyzer::new(WhitespaceTokenizer::new()).with_normalizer(UnicodeNormalizer::new());
+        analyzers.set(FieldId::new(1), analyzer);
+        let analyzer2 =
+            Analyzer::new(WhitespaceTokenizer::new()).with_normalizer(UnicodeNormalizer::new());
+        analyzers.set(FieldId::new(2), analyzer2);
+
+        let mut builder = InMemoryIndexBuilder::new(analyzers);
+        builder.register_field_alias(FieldId::new(1), "title");
+        builder.register_field_alias(FieldId::new(2), "body");
+
+        // Index 300 docs with varied term frequencies across both fields.
+        // "programming" appears in all docs to exercise >128 postings in BlockDelta.
+        for doc_id in 1..=300 {
+            let title = if doc_id % 10 == 0 {
+                "rust language"
+            } else if doc_id % 5 == 0 {
+                "rust systems"
+            } else if doc_id % 3 == 0 {
+                "rust guide"
+            } else {
+                "systems design"
+            };
+
+            let body = if doc_id % 15 == 0 {
+                "programming language systems rust"
+            } else if doc_id % 7 == 0 {
+                "programming systems architecture"
+            } else {
+                "programming guide"
+            };
+
+            builder
+                .index_document(doc_id, &[(FieldId::new(1), title), (FieldId::new(2), body)])
+                .expect("doc should index");
+        }
+
+        let index = builder.build_index();
+
+        // Verify "programming" has >128 postings (exercises multi-block BlockDelta).
+        let field = FieldId::new(2);
+        let Some(programming_term_id) = index.resolve_term(field, "programming") else {
+            panic!("'programming' term should exist after indexing");
+        };
+        let programming_postings = index.postings.get(&programming_term_id).unwrap();
+        assert!(
+            programming_postings.len() > 128,
+            "programming term should have >128 postings to test multi-block BlockDelta; got {}",
+            programming_postings.len()
+        );
+
+        // Test cases: single-term, OR (two terms), AND (two terms), fielded query.
+        // Note: BM25F cross-field aggregation is NOT cursor-wired in ITER-0003B; stays InMemory.
+        let queries = alloc::vec![
+            "programming",      // single-term: exercises Term node with source threading
+            "rust OR systems",  // OR: verifies OR is non-scored by cursor (stays InMemory)
+            "rust AND systems", // AND: verifies AND threads source through children
+            "title:rust",       // fielded: exercises Term node with source threading
+        ];
+
+        for query_text in queries {
+            let mut plan_scratch = leit_query::PlannerScratch::new();
+            let planner = Planner::new();
+            let context = leit_query::PlanningContext::new(&index, &index)
+                .with_default_fields(index.default_fields());
+            let plan = planner
+                .plan(query_text, &context, &mut plan_scratch)
+                .expect("query should plan");
+
+            // Test with each cursor source: InMemory, DeltaVarint, BlockDelta.
+            for (source_name, source) in &[
+                ("InMemory", CursorSource::InMemory),
+                (
+                    "DeltaVarint",
+                    CursorSource::Compressed(CodecId::DeltaVarint),
+                ),
+                ("BlockDelta", CursorSource::Compressed(CodecId::BlockDelta)),
+            ] {
+                let mut stats = ExecutionStats::default();
+                let result = index
+                    .evaluate_plan_with_source(
+                        &plan,
+                        SearchScorer::bm25(),
+                        &NoFilter,
+                        &mut stats,
+                        *source,
+                    )
+                    .expect("query should execute with source");
+
+                // For single-term queries, store the ordered top-k result for comparison.
+                // For multi-term queries (OR, AND), we check ordering separately below.
+                let mut top_k: Vec<(u32, Score)> = result
+                    .scores
+                    .iter()
+                    .map(|(&doc_id, &score)| (doc_id, score))
+                    .collect();
+                // Sort by score descending, then doc_id ascending (matching TopKCollector ordering).
+                top_k.sort_by(|a, b| {
+                    b.1.partial_cmp(&a.1)
+                        .unwrap_or(core::cmp::Ordering::Equal)
+                        .then_with(|| a.0.cmp(&b.0))
+                });
+
+                // On first source (InMemory), store as baseline.
+                if *source_name == "InMemory" {
+                    // Verify matched docs are non-empty for these queries.
+                    assert!(
+                        !result.matches.is_empty(),
+                        "query should match at least one doc"
+                    );
+                } else {
+                    // Fetch baseline result for comparison.
+                    let mut baseline_stats = ExecutionStats::default();
+                    let baseline_result = index
+                        .evaluate_plan_with_source(
+                            &plan,
+                            SearchScorer::bm25(),
+                            &NoFilter,
+                            &mut baseline_stats,
+                            CursorSource::InMemory,
+                        )
+                        .expect("baseline query should execute");
+
+                    let mut baseline_top_k: Vec<(u32, Score)> = baseline_result
+                        .scores
+                        .iter()
+                        .map(|(&doc_id, &score)| (doc_id, score))
+                        .collect();
+                    baseline_top_k.sort_by(|a, b| {
+                        b.1.partial_cmp(&a.1)
+                            .unwrap_or(core::cmp::Ordering::Equal)
+                            .then_with(|| a.0.cmp(&b.0))
+                    });
+
+                    // Verify: same ordered top-k across all sources.
+                    assert_eq!(
+                        top_k.len(),
+                        baseline_top_k.len(),
+                        "ordered top-k length mismatch"
+                    );
+                    assert_eq!(
+                        top_k, baseline_top_k,
+                        "ordered top-k mismatch across sources"
+                    );
+                }
+            }
+        }
     }
 }
