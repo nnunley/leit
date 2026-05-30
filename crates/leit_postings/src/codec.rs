@@ -150,12 +150,12 @@ pub trait Codec {
     ///
     /// `Ok(())` on success, or a `CodecError` if decoding fails.
     ///
-    /// # TODO(ITER-0003): `DecodeScratch` wrapper
+    /// # `DecodeScratch` wrapper (ITER-0003)
     ///
-    /// The decode-scratch ownership model (e.g., a `DecodeScratch` struct holding
-    /// these buffers and reusable across multiple cursors) is designed and built
-    /// in ITER-0003 (STORY-0079). This codec layer intentionally does NOT define
-    /// a decode-scratch type so that decision is not boxed in here.
+    /// The decode-scratch ownership model is now implemented: `DecodeScratch` (in the
+    /// `cursor` module) holds these buffers and is reusable across multiple cursors via
+    /// the workspace-borrowed pattern (STORY-0079, DEC-13). The cursor adaptor lives in
+    /// `cursor.rs` and provides zero-allocation steady-state traversal.
     fn decode(
         &self,
         bytes: &[u8],
@@ -484,6 +484,107 @@ impl Codec for BlockDeltaCodec {
         }
 
         Ok(())
+    }
+}
+
+impl crate::cursor::BlockDecoder for BlockDeltaCodec {
+    /// Decode a single `BlockDelta` block independently of any cursor.
+    ///
+    /// Walks block headers from the start of `bytes`, skipping earlier blocks' doc
+    /// streams in O(1) via their `doc_bytes_len` and stepping over their TF varints,
+    /// then decodes only block `block_id`'s doc and TF streams into the (cleared)
+    /// caller buffers. Returns the number of documents decoded, or `Ok(0)` if
+    /// `block_id` is past the last block.
+    fn decode_block(
+        &self,
+        bytes: &[u8],
+        block_id: usize,
+        out_docs: &mut Vec<SegmentLocalDocId>,
+        out_tfs: &mut Vec<TermFreq>,
+    ) -> Result<usize, CodecError> {
+        out_docs.clear();
+        out_tfs.clear();
+
+        if bytes.is_empty() {
+            return Err(CodecError::Truncated);
+        }
+        let marker = bytes[0];
+        if marker != CodecId::BlockDelta.to_u8() {
+            return Err(CodecError::BadMarker(marker));
+        }
+
+        let mut pos = 1;
+        let mut current_block = 0_usize;
+
+        while pos < bytes.len() {
+            // Block header: doc_count, first_doc, last_doc, doc_bytes_len.
+            let (doc_count, read) = decode_varint(&bytes[pos..])?;
+            pos += read;
+            let doc_count = doc_count as usize;
+            if doc_count == 0 {
+                return Err(CodecError::InvalidBlockCount);
+            }
+
+            let (first_doc, read) = decode_varint(&bytes[pos..])?;
+            pos += read;
+            let (last_doc, read) = decode_varint(&bytes[pos..])?;
+            pos += read;
+            let (doc_bytes_len, read) = decode_varint(&bytes[pos..])?;
+            pos += read;
+            let doc_bytes_len = doc_bytes_len as usize;
+
+            if pos + doc_bytes_len > bytes.len() {
+                return Err(CodecError::Truncated);
+            }
+
+            if current_block == block_id {
+                // Decode this block's doc stream.
+                let doc_stream = &bytes[pos..pos + doc_bytes_len];
+                let mut doc_pos = 0;
+                let mut prev_doc = 0_u32;
+                for _ in 0..doc_count {
+                    if doc_pos >= doc_stream.len() {
+                        return Err(CodecError::Truncated);
+                    }
+                    let (delta, read) = decode_varint(&doc_stream[doc_pos..])?;
+                    doc_pos += read;
+                    let doc_id = prev_doc
+                        .checked_add(delta)
+                        .ok_or(CodecError::InvalidVarint)?;
+                    out_docs.push(SegmentLocalDocId::new(doc_id));
+                    prev_doc = doc_id;
+                }
+                if out_docs[0].get() != first_doc || prev_doc != last_doc {
+                    return Err(CodecError::BlockHeaderMismatch);
+                }
+                pos += doc_bytes_len;
+
+                // Decode this block's TF stream.
+                for _ in 0..doc_count {
+                    if pos >= bytes.len() {
+                        return Err(CodecError::Truncated);
+                    }
+                    let (tf, read) = decode_varint(&bytes[pos..])?;
+                    pos += read;
+                    out_tfs.push(TermFreq::new(tf));
+                }
+                return Ok(doc_count);
+            }
+
+            // Not the target block: skip its doc stream (O(1)) and step over TF varints.
+            pos += doc_bytes_len;
+            for _ in 0..doc_count {
+                if pos >= bytes.len() {
+                    return Err(CodecError::Truncated);
+                }
+                let (_, read) = decode_varint(&bytes[pos..])?;
+                pos += read;
+            }
+            current_block += 1;
+        }
+
+        // block_id is past the last block.
+        Ok(0)
     }
 }
 

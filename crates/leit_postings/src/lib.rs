@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 use leit_core::{EntityId, TermId};
 
 pub mod codec;
+pub mod cursor;
 
 /// A single posting: term occurrence in a document with ``Id``.
 #[derive(Clone, Debug, PartialEq, Eq)]
