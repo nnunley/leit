@@ -10,11 +10,18 @@ homepage.workspace = true
 description = "Deterministic test harness and corpus generator for the Leit retrieval kernel Phase 2"
 publish = false
 
+# Only rapidhash is used by the library surface (deterministic corpus hashing).
+# The leit_* crates are used solely by the in-crate integration tests
+# (`#[cfg(test)] mod integration_tests`), so they belong in dev-dependencies
+# per the usage-site rule (STORY-0096): test/bench-only deps are not part of the
+# crate's production dependency graph.
 [dependencies]
+rapidhash = { workspace = true }
+
+[dev-dependencies]
 leit_core = { features = ["std"], workspace = true }
 leit_index = { features = ["std"], workspace = true }
 leit_text = { features = ["std"], workspace = true }
-rapidhash = "4.4"
 
 [lints]
 workspace = true
