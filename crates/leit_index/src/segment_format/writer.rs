@@ -777,6 +777,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn columnar_reserved_not_decoded() {
+        // The columnar slot is reserved for a future release: the writer records its offset in the
+        // header but never emits any columnar bytes, and there is no reader that decodes the slot.
+        let index = make_test_index();
+        let segment = write_segment(&index).expect("write_segment should succeed");
+        let header = SegmentHeader::read(&segment).expect("header should decode");
+
+        // The columnar offset is present and readable (a reserved slot in the fixed header).
+        assert!(
+            header.columnar_offset >= header.block_meta_offset,
+            "columnar offset must sit after the populated sections"
+        );
+        // The columnar section is zero-length: it shares its offset with both the equally-reserved
+        // stored-fields section and the footer that terminates the section sequence.
+        assert_eq!(
+            header.columnar_offset, header.stored_fields_offset,
+            "columnar shares its offset with stored_fields (both reserved, zero-length)"
+        );
+        assert_eq!(
+            header.columnar_offset, header.footer_offset,
+            "columnar is zero-length: its offset coincides with the footer offset"
+        );
+        // The segment ends with the 4-byte footer immediately after the columnar offset, leaving no
+        // bytes for columnar content.
+        let columnar_offset = usize::try_from(header.columnar_offset).expect("offset fits usize");
+        assert_eq!(
+            segment.len() - columnar_offset,
+            4,
+            "only the footer follows the columnar offset; the columnar section holds no bytes"
+        );
+    }
+
     /// Build a multi-block test index with a term having > `BLOCK_DOC_COUNT` postings.
     /// Also includes single-posting terms to verify block `count=1`.
     fn make_multiblock_test_index() -> InMemoryIndex {
