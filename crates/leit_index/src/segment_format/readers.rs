@@ -13,7 +13,7 @@
 //! - `LexiconReader`: index entries (`term_offset`: `u64` + `term_len`: `u32` + `postings_table_index`: `u32`,
 //!   16 bytes/entry) + variable-length term bytes blob
 //! - `PostingsTableReader`: `postings_data_offset` (`u64`) + `postings_data_len` (`u32`) + `doc_freq` (`u32`)
-//!   + `reserved_codec_id` (`u32`), 20 bytes/entry
+//!   + `reserved_codec_id` (`u32`) + `first_block_index` (`u32`) + `block_count` (`u32`), 28 bytes/entry
 //! - `PostingsDataReader`: borrowed postings payload bytes; ranges from `PostingsTableReader` offsets
 //! - `BlockMetadataReader`: per-block summaries (`end_doc`: `u32` + `max_term_freq`: `u32` +
 //!   `decode_offset`: `u32`, 12 bytes/entry); decoded via alignment-free little-endian reads so the
@@ -417,13 +417,15 @@ impl<'a> LexiconReader<'a> {
 
 /// Postings table reader: borrows postings metadata entries (fixed-width, O(1) access).
 ///
-/// **Layout (20 bytes per entry):**
+/// **Layout (28 bytes per entry):**
 /// - Offset 0: count (u32 LE, number of postings entries)
-/// - Offset 4..: entries (20 bytes each):
+/// - Offset 4..: entries (28 bytes each):
 ///   - `postings_data_offset` (u64, offset 0)
 ///   - `postings_data_len` (u32, offset 8)
 ///   - `doc_freq` (u32, offset 12)
 ///   - `reserved_codec_id` (u32, offset 16) — reserved for per-term codec selection; currently 0
+///   - `first_block_index` (u32, offset 20) — index of the first block for this term
+///   - `block_count` (u32, offset 24) — number of blocks for this term
 ///
 /// **Bounds:** `postings_table_offset .. postings_data_offset`
 #[derive(Clone, Copy, Debug)]
@@ -491,14 +493,14 @@ impl<'a> PostingsTableReader<'a> {
         self.count == 0
     }
 
-    /// Get postings metadata entry [i]: (`postings_data_offset`, `postings_data_len`, `doc_freq`, `reserved_codec_id`).
+    /// Get postings metadata entry [i]: (`postings_data_offset`, `postings_data_len`, `doc_freq`, `reserved_codec_id`, `first_block_index`, `block_count`).
     ///
     /// # Arguments
     /// * `i` - entry index (`0..len()`)
     ///
     /// # Returns
-    /// (`postings_data_offset`: u64, `postings_data_len`: u32, `doc_freq`: u32, `reserved_codec_id`: u32) or `SegmentError`.
-    pub fn entry(&self, i: u32) -> Result<(u64, u32, u32, u32), SegmentError> {
+    /// (`postings_data_offset`: u64, `postings_data_len`: u32, `doc_freq`: u32, `reserved_codec_id`: u32, `first_block_index`: u32, `block_count`: u32) or `SegmentError`.
+    pub fn entry(&self, i: u32) -> Result<(u64, u32, u32, u32, u32, u32), SegmentError> {
         if i >= self.count {
             return Err(SegmentError::BadOffset {
                 offset: i as u64,
@@ -506,10 +508,10 @@ impl<'a> PostingsTableReader<'a> {
             });
         }
 
-        // Entry offset: 4 (count) + i * 20
+        // Entry offset: 4 (count) + i * 28
         let i_u64 = i as u64;
         let entry_offset = 4_u64
-            .checked_add(i_u64.checked_mul(20).ok_or(SegmentError::BadOffset {
+            .checked_add(i_u64.checked_mul(28).ok_or(SegmentError::BadOffset {
                 offset: i_u64,
                 limit: u64::MAX,
             })?)
@@ -525,15 +527,15 @@ impl<'a> PostingsTableReader<'a> {
                     limit: self.section_end,
                 })?;
 
-        // Bounds check: entry is 20 bytes
-        let absolute_offset_plus_20 =
+        // Bounds check: entry is 28 bytes
+        let absolute_offset_plus_28 =
             absolute_offset
-                .checked_add(20)
+                .checked_add(28)
                 .ok_or(SegmentError::BadOffset {
                     offset: absolute_offset,
                     limit: self.section_end,
                 })?;
-        if absolute_offset_plus_20 > self.section_end {
+        if absolute_offset_plus_28 > self.section_end {
             return Err(SegmentError::BadOffset {
                 offset: absolute_offset,
                 limit: self.section_end,
@@ -545,12 +547,16 @@ impl<'a> PostingsTableReader<'a> {
         let postings_data_len = read_u32_le(self.buffer, offset_usize + 8)?;
         let doc_freq = read_u32_le(self.buffer, offset_usize + 12)?;
         let reserved_codec_id = read_u32_le(self.buffer, offset_usize + 16)?;
+        let first_block_index = read_u32_le(self.buffer, offset_usize + 20)?;
+        let block_count = read_u32_le(self.buffer, offset_usize + 24)?;
 
         Ok((
             postings_data_offset,
             postings_data_len,
             doc_freq,
             reserved_codec_id,
+            first_block_index,
+            block_count,
         ))
     }
 }
@@ -685,7 +691,8 @@ impl<'a> BlockMetadataReader<'a> {
     /// # Returns
     /// `BlockMetadataReader` or `SegmentError` if section length is not a multiple of 12, or out of bounds.
     ///
-    /// In the current format, this section is typically zero-length; the reader is reserved for future releases.
+    /// In the v1 format, this section is always populated with per-block summaries for efficient block-aware skipping.
+    /// Only when a corpus has no terms is this section zero-length.
     pub fn new(
         buffer: &'a [u8],
         block_meta_offset: u64,
@@ -935,24 +942,29 @@ mod tests {
 
     #[test]
     fn test_postings_table_reader_single_entry() {
-        // Postings table with 1 entry: count (1) + entry (20 bytes)
+        // Postings table with 1 entry: count (1) + entry (28 bytes)
         let mut post_table = vec![];
         post_table.extend_from_slice(&1_u32.to_le_bytes()); // count
         post_table.extend_from_slice(&100_u64.to_le_bytes()); // postings_data_offset
         post_table.extend_from_slice(&20_u32.to_le_bytes()); // postings_data_len
         post_table.extend_from_slice(&5_u32.to_le_bytes()); // doc_freq
         post_table.extend_from_slice(&0_u32.to_le_bytes()); // reserved_codec_id
+        post_table.extend_from_slice(&0_u32.to_le_bytes()); // first_block_index
+        post_table.extend_from_slice(&1_u32.to_le_bytes()); // block_count
 
         let buffer = make_test_segment(vec![], vec![], post_table, vec![]);
         let reader =
-            PostingsTableReader::new(&buffer, 80, 80 + 4 + 20).expect("should create reader");
+            PostingsTableReader::new(&buffer, 80, 80 + 4 + 28).expect("should create reader");
         assert_eq!(reader.len(), 1);
 
-        let (offset, len, doc_freq, codec_id) = reader.entry(0).expect("entry should exist");
+        let (offset, len, doc_freq, codec_id, first_block_idx, block_count) =
+            reader.entry(0).expect("entry should exist");
         assert_eq!(offset, 100);
         assert_eq!(len, 20);
         assert_eq!(doc_freq, 5);
         assert_eq!(codec_id, 0, "reserved_codec_id should round-trip");
+        assert_eq!(first_block_idx, 0);
+        assert_eq!(block_count, 1);
     }
 
     #[test]
@@ -1246,7 +1258,9 @@ mod tests {
         post_table.extend_from_slice(&0_u64.to_le_bytes()); // postings_data_offset
         post_table.extend_from_slice(&8_u32.to_le_bytes()); // postings_data_len
         post_table.extend_from_slice(&2_u32.to_le_bytes()); // doc_freq
-        post_table.extend_from_slice(&0_u32.to_le_bytes()); // reserved_codec_id (20 bytes/entry)
+        post_table.extend_from_slice(&0_u32.to_le_bytes()); // reserved_codec_id
+        post_table.extend_from_slice(&0_u32.to_le_bytes()); // first_block_index
+        post_table.extend_from_slice(&1_u32.to_le_bytes()); // block_count (28 bytes/entry)
 
         let postings_data = vec![1, 2, 3, 4, 5, 6, 7, 8]; // 8 bytes
 
@@ -1290,12 +1304,14 @@ mod tests {
             PostingsTableReader::new(&buffer, postings_table_offset, postings_table_end)
                 .expect("open postings table");
         assert_eq!(post_reader.len(), 1);
-        let (post_offset, post_len, doc_freq, codec_id) =
+        let (post_offset, post_len, doc_freq, codec_id, first_block_idx, block_count) =
             post_reader.entry(0).expect("read postings entry");
         assert_eq!(post_offset, 0);
         assert_eq!(post_len, 8);
         assert_eq!(doc_freq, 2);
         assert_eq!(codec_id, 0, "reserved_codec_id should round-trip");
+        assert_eq!(first_block_idx, 0);
+        assert_eq!(block_count, 1);
 
         // Open postings data
         let post_data_reader =

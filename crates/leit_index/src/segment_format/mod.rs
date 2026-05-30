@@ -36,7 +36,7 @@ pub mod view;
 
 #[expect(
     unreachable_pub,
-    reason = "block_meta module items will be re-exported once BlockMetadataReader is wired (ITER-0005 T2)"
+    reason = "block_meta module items are used internally for per-block metadata storage and will be re-exported once public block navigation is stabilized"
 )]
 pub mod block_meta;
 
