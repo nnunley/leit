@@ -257,3 +257,73 @@ WAND consumes — defining them now *helps* Phase 3.
 | DEC-08 fully borrowed views | STORY-0083 | ITER-0004 | view accessors |
 | DEC-09 strict builder/reader | STORY-0084 | ITER-0004 | type boundary |
 | DEC-10 versioning/checks | STORY-0047 | ITER-0004 | version-rejection |
+| DEC-11 block boundary strategy | STORY-0087 | ITER-0002 (codec) / ITER-0004 (writer) | block codec conformance |
+| DEC-12 v1 postings/block layout | STORY-0088 | ITER-0002 | SCENARIO-0006 |
+
+---
+
+## DEC-11 — Postings block boundary: fixed document-count blocks (STORY-0087) — RESOLVED
+
+**Decision:** v1 postings blocks are bounded by a **fixed document count** of **128 documents
+per block** (the last block may be short). Boundaries are by doc-count, **not** fixed byte size
+and **not** an adaptive/merge heuristic.
+
+**Rationale (measured against ITER-0000 evidence):**
+- The ITER-0000 wind-tunnel corpus is Zipfian (a few very long postings lists, a long tail of
+  short ones). A **fixed byte-size** block would split a list at unpredictable doc positions,
+  forcing partial-integer state across block boundaries and making per-block doc-range/skip
+  metadata (the Phase 3 WAND constraint recorded for ITER-0005) awkward to compute. A fixed
+  **doc-count** block gives every block a clean `[first_doc, last_doc]` range and a known item
+  count, which is exactly what skip-lists and block-max metadata need.
+- 128 docs/block is the conventional Lucene/PForDelta block size and matches the decode-batch
+  granularity that keeps the decode scratch small and cache-resident. It is large enough to
+  amortize per-block header cost over the long lists that dominate query latency in the baseline
+  (`single_term` ≈ 136 µs/1k), small enough that selective block decode (the deferred ITER-0003
+  `advance_to` skip) skips meaningful work.
+- Short lists (< 128 docs — the Zipfian tail) occupy a single block; no padding, no waste.
+
+**Consequence / forward-compat:** Each block carries its document count and first/last doc in its
+header, so ITER-0005's block-metadata sidecar can reference blocks by ordinal and attach
+`max_score` + doc-range without re-deriving boundaries. The boundary constant lives in one place
+(`BLOCK_DOC_COUNT`) so a future codec may tune it without a format-break (the count is encoded
+per block, not assumed by readers).
+
+## DEC-12 — v1 postings/block layout for compressed traversal (STORY-0088) — RESOLVED
+
+**Decision:** A postings list serializes as a sequence of independently-decodable **blocks**.
+Each block is laid out as:
+
+```
+block := block_header doc_id_stream tf_stream
+block_header := varint(doc_count) varint(first_doc) varint(last_doc) varint(doc_bytes_len)
+doc_id_stream := varint(first_delta) varint(delta)*        # deltas from previous doc id
+tf_stream     := varint(tf)*                                # one per doc, parallel to doc stream
+```
+
+- **Doc IDs** are **delta-encoded** then **LEB128 varint**-encoded (deltas are non-negative
+  because postings are doc-sorted). The first doc in a block is stored as a delta from 0 (i.e. its
+  absolute value), so each block is self-contained and decodable without the previous block
+  (DEC-11 enables this).
+- **Term frequencies** are LEB128 varint-encoded, one per doc, in a stream parallel to the doc-id
+  stream — so a doc-only cursor can decode the doc stream and skip the TF stream using
+  `doc_bytes_len`.
+- **`doc_bytes_len`** in the header lets a reader locate the TF stream (and the next block) without
+  decoding the doc stream — the basis for the deferred ITER-0003 selective/skip decode.
+- **Codec marker:** a postings list is prefixed by a 1-byte `CodecId` (DEC: `0 = DeltaVarint`
+  single-block, `1 = BlockDelta` doc-count blocks). This is the per-list marker; reserving the
+  *field in the segment format* is deferred to ITER-0004 (STORY-0002 AC-3).
+
+**Traversal-semantics contract (uncompressed ↔ compressed API stability — STORY-0088 AC-2 is the
+e2e proof, deferred to ITER-0003):** the codec **API speaks named segment-resident types**
+`SegmentLocalDocId` and `TermFreq` (the u32 values are delta-encoded and varint-encoded at the
+byte level, unchanged). The generic `EntityId` is lowered to `SegmentLocalDocId` at the
+segment-write boundary (ITER-0004). Decode produces exactly the `(SegmentLocalDocId, TermFreq)`
+sequence, in doc-ascending order, that the in-memory `PostingsList<Id>` will hold — byte-for-byte
+equal round trip (SCENARIO-0006). The codec writes decoded values into **caller-provided output
+buffers** (`&mut Vec<SegmentLocalDocId>` and `&mut Vec<TermFreq>`); it does **not** own a
+decode-scratch type. The decode-scratch ownership wrapper and the cursor adaptor over this API
+are decided and built in ITER-0003 (STORY-0079) — the codec layer is deliberately
+scratch-ownership-agnostic so that decision is not boxed in here.
+
+**Decided in ITER-0002 against the ITER-0000 wind-tunnel baseline; enforced by the codec
+implementation (SCENARIO-0006 round-trip) and measured by SCENARIO-0070 (codec comparison).**

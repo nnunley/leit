@@ -21,7 +21,7 @@ use core::hash::Hash;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign};
 
 pub mod segment_ids;
-pub use segment_ids::{BlockId, FilterExprId, SegmentLocalDocId, SegmentOrd};
+pub use segment_ids::{BlockId, FilterExprId, SegmentLocalDocId, SegmentOrd, TermFreq};
 
 /// Unique identifier for a field in an index.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]

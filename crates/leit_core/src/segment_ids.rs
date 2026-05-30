@@ -1,11 +1,16 @@
 // Copyright 2026 the Leit Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-//! Segment-resident core ID types with a stable, zero-copy serialized representation.
+//! Segment-resident core ID and value types with a stable, zero-copy serialized
+//! representation.
 //!
 //! Unlike the in-memory index identifiers ([`FieldId`](crate::FieldId),
-//! [`TermId`](crate::TermId), [`SegmentId`](crate::SegmentId)), the types in this
-//! module are designed to appear **directly in mmap'd segment bytes**. Each is a
+//! [`TermId`](crate::TermId), [`SegmentId`](crate::SegmentId)) and the polymorphic
+//! in-memory document identifier ([`EntityId`](crate::EntityId)), the types in this
+//! module are designed to appear **directly in mmap'd segment bytes**. The generic
+//! `EntityId` is *lowered* to the concrete [`SegmentLocalDocId`] when a segment is
+//! written; segment-layer code (postings codecs, readers) speaks these named types,
+//! never anonymous `u32`. Each is a
 //! `#[repr(transparent)]` newtype over a 4-byte little-endian array, so a `&[u8]`
 //! slice taken from a memory-mapped buffer can be viewed in place as `&[Id]` with
 //! no allocation and no deserialization pass (see the Phase 2 architectural
@@ -84,6 +89,11 @@ segment_id!(
 segment_id!(
     SegmentLocalDocId,
     "Document identifier local to a single segment (segment-relative doc ID)."
+);
+segment_id!(
+    TermFreq,
+    "Term frequency: occurrences of a term in a document. A segment-resident value \
+     type (not an identifier) carried alongside `SegmentLocalDocId` in postings."
 );
 
 #[cfg(test)]
