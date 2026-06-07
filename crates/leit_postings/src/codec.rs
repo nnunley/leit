@@ -202,6 +202,10 @@ fn decode_varint(bytes: &[u8]) -> Result<(u32, usize), CodecError> {
         let byte = bytes[pos];
         pos += 1;
 
+        if shift == 28 && (byte & 0x7f) > 0x0f {
+            return Err(CodecError::InvalidVarint);
+        }
+
         value |= ((byte & 0x7f) as u32) << shift;
 
         if (byte & 0x80) == 0 {
@@ -213,6 +217,17 @@ fn decode_varint(bytes: &[u8]) -> Result<(u32, usize), CodecError> {
             return Err(CodecError::InvalidVarint);
         }
     }
+}
+
+#[inline]
+fn decode_block_doc_count(bytes: &[u8], pos: &mut usize) -> Result<usize, CodecError> {
+    let (doc_count, bytes_read) = decode_varint(&bytes[*pos..])?;
+    *pos += bytes_read;
+    let doc_count = doc_count as usize;
+    if doc_count == 0 || doc_count > BLOCK_DOC_COUNT {
+        return Err(CodecError::InvalidBlockCount);
+    }
+    Ok(doc_count)
 }
 
 /// Delta-encoding codec: single-block varint encoding.
@@ -417,13 +432,7 @@ impl Codec for BlockDeltaCodec {
 
         while pos < bytes.len() {
             // Decode block header.
-            let (doc_count, bytes_read) = decode_varint(&bytes[pos..])?;
-            pos += bytes_read;
-            let doc_count = doc_count as usize;
-
-            if doc_count == 0 {
-                return Err(CodecError::InvalidBlockCount);
-            }
+            let doc_count = decode_block_doc_count(bytes, &mut pos)?;
 
             let (first_doc, bytes_read) = decode_varint(&bytes[pos..])?;
             pos += bytes_read;
@@ -460,6 +469,9 @@ impl Codec for BlockDeltaCodec {
                     .ok_or(CodecError::InvalidVarint)?;
                 out_docs.push(SegmentLocalDocId::new(doc_id));
                 prev_doc = doc_id;
+            }
+            if doc_pos != doc_stream.len() {
+                return Err(CodecError::InvalidVarint);
             }
 
             // Validate the block header's doc-range against the decoded stream.
@@ -518,12 +530,7 @@ impl crate::cursor::BlockDecoder for BlockDeltaCodec {
 
         while pos < bytes.len() {
             // Block header: doc_count, first_doc, last_doc, doc_bytes_len.
-            let (doc_count, read) = decode_varint(&bytes[pos..])?;
-            pos += read;
-            let doc_count = doc_count as usize;
-            if doc_count == 0 {
-                return Err(CodecError::InvalidBlockCount);
-            }
+            let doc_count = decode_block_doc_count(bytes, &mut pos)?;
 
             let (first_doc, read) = decode_varint(&bytes[pos..])?;
             pos += read;
@@ -553,6 +560,9 @@ impl crate::cursor::BlockDecoder for BlockDeltaCodec {
                         .ok_or(CodecError::InvalidVarint)?;
                     out_docs.push(SegmentLocalDocId::new(doc_id));
                     prev_doc = doc_id;
+                }
+                if doc_pos != doc_stream.len() {
+                    return Err(CodecError::InvalidVarint);
                 }
                 if out_docs[0].get() != first_doc || prev_doc != last_doc {
                     return Err(CodecError::BlockHeaderMismatch);
@@ -677,6 +687,14 @@ mod tests {
         let bytes = [0x80]; // Incomplete varint.
         let result = decode_varint(&bytes);
         assert_eq!(result, Err(CodecError::Truncated));
+    }
+
+    #[test]
+    fn test_varint_decode_terminal_five_byte_overflow() {
+        // 5-byte u32 varints may only use the low 4 payload bits in the terminal byte.
+        let bytes = [0x80, 0x80, 0x80, 0x80, 0x10];
+        let result = decode_varint(&bytes);
+        assert_eq!(result, Err(CodecError::InvalidVarint));
     }
 
     // ===== DeltaVarint Codec Tests =====
@@ -1197,6 +1215,35 @@ mod tests {
     }
 
     #[test]
+    fn test_delta_varint_malformed_terminal_five_byte_doc_delta() {
+        let codec = DeltaVarintCodec;
+        let mut bad_bytes = Vec::new();
+        bad_bytes.push(CodecId::DeltaVarint.to_u8());
+        bad_bytes.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x10, 1_u8]);
+
+        let mut docs = Vec::new();
+        let mut tfs = Vec::new();
+        let result = codec.decode(&bad_bytes, &mut docs, &mut tfs);
+
+        assert_eq!(result, Err(CodecError::InvalidVarint));
+    }
+
+    #[test]
+    fn test_delta_varint_malformed_terminal_five_byte_tf() {
+        let codec = DeltaVarintCodec;
+        let mut bad_bytes = Vec::new();
+        bad_bytes.push(CodecId::DeltaVarint.to_u8());
+        bad_bytes.push(10_u8);
+        bad_bytes.extend_from_slice(&[0x80, 0x80, 0x80, 0x80, 0x10]);
+
+        let mut docs = Vec::new();
+        let mut tfs = Vec::new();
+        let result = codec.decode(&bad_bytes, &mut docs, &mut tfs);
+
+        assert_eq!(result, Err(CodecError::InvalidVarint));
+    }
+
+    #[test]
     fn test_block_delta_doc_bytes_len_bounds_check() {
         // Create a block header claiming more doc bytes than available.
         let codec = BlockDeltaCodec;
@@ -1212,6 +1259,74 @@ mod tests {
 
         // Must reject, not read past end
         assert_eq!(result, Err(CodecError::Truncated));
+    }
+
+    #[test]
+    fn test_block_delta_rejects_doc_count_above_block_size() {
+        let codec = BlockDeltaCodec;
+        let mut bad_bytes = Vec::new();
+        bad_bytes.push(CodecId::BlockDelta.to_u8());
+        bad_bytes.extend_from_slice(&[129_u8, 10_u8, 20_u8, 1_u8, 10_u8, 1_u8]);
+
+        let mut docs = Vec::new();
+        let mut tfs = Vec::new();
+        let result = codec.decode(&bad_bytes, &mut docs, &mut tfs);
+
+        assert_eq!(result, Err(CodecError::InvalidBlockCount));
+    }
+
+    #[test]
+    fn test_block_delta_rejects_unconsumed_doc_stream_bytes() {
+        let codec = BlockDeltaCodec;
+        let encoded = codec.encode(&[
+            (SegmentLocalDocId::new(10), TermFreq::new(2)),
+            (SegmentLocalDocId::new(20), TermFreq::new(3)),
+        ]);
+
+        let mut corrupt = encoded.clone();
+        corrupt[4] = 3;
+        corrupt.insert(8, 0_u8);
+
+        let mut docs = Vec::new();
+        let mut tfs = Vec::new();
+        let result = codec.decode(&corrupt, &mut docs, &mut tfs);
+
+        assert_eq!(result, Err(CodecError::InvalidVarint));
+    }
+
+    #[test]
+    fn test_block_delta_decode_block_rejects_doc_count_above_block_size() {
+        let codec = BlockDeltaCodec;
+        let mut bad_bytes = Vec::new();
+        bad_bytes.push(CodecId::BlockDelta.to_u8());
+        bad_bytes.extend_from_slice(&[129_u8, 10_u8, 20_u8, 1_u8, 10_u8, 1_u8]);
+
+        let mut docs = Vec::new();
+        let mut tfs = Vec::new();
+        let result =
+            crate::cursor::BlockDecoder::decode_block(&codec, &bad_bytes, 0, &mut docs, &mut tfs);
+
+        assert_eq!(result, Err(CodecError::InvalidBlockCount));
+    }
+
+    #[test]
+    fn test_block_delta_decode_block_rejects_unconsumed_doc_stream_bytes() {
+        let codec = BlockDeltaCodec;
+        let encoded = codec.encode(&[
+            (SegmentLocalDocId::new(10), TermFreq::new(2)),
+            (SegmentLocalDocId::new(20), TermFreq::new(3)),
+        ]);
+
+        let mut corrupt = encoded.clone();
+        corrupt[4] = 3;
+        corrupt.insert(8, 0_u8);
+
+        let mut docs = Vec::new();
+        let mut tfs = Vec::new();
+        let result =
+            crate::cursor::BlockDecoder::decode_block(&codec, &corrupt, 0, &mut docs, &mut tfs);
+
+        assert_eq!(result, Err(CodecError::InvalidVarint));
     }
 
     #[test]
