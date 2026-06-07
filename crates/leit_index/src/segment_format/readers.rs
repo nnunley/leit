@@ -118,6 +118,12 @@ impl<'a> FieldTableReader<'a> {
                 limit: buffer_len,
             });
         }
+        if lexicon_offset > buffer_len {
+            return Err(SegmentError::BadOffset {
+                offset: lexicon_offset,
+                limit: buffer_len,
+            });
+        }
 
         // If zero-length (field_table_offset == lexicon_offset), return empty reader
         if field_table_offset == lexicon_offset {
@@ -249,6 +255,12 @@ impl<'a> LexiconReader<'a> {
         if lexicon_offset > buffer_len {
             return Err(SegmentError::BadOffset {
                 offset: lexicon_offset,
+                limit: buffer_len,
+            });
+        }
+        if postings_table_offset > buffer_len {
+            return Err(SegmentError::BadOffset {
+                offset: postings_table_offset,
                 limit: buffer_len,
             });
         }
@@ -452,6 +464,12 @@ impl<'a> PostingsTableReader<'a> {
                 limit: buffer_len,
             });
         }
+        if postings_data_offset > buffer_len {
+            return Err(SegmentError::BadOffset {
+                offset: postings_data_offset,
+                limit: buffer_len,
+            });
+        }
 
         // If zero-length, return empty reader
         if postings_table_offset == postings_data_offset {
@@ -589,6 +607,12 @@ impl<'a> PostingsDataReader<'a> {
                 limit: buffer_len,
             });
         }
+        if block_meta_offset > buffer_len {
+            return Err(SegmentError::BadOffset {
+                offset: block_meta_offset,
+                limit: buffer_len,
+            });
+        }
 
         Ok(Self {
             buffer,
@@ -691,6 +715,12 @@ impl<'a> BlockMetadataReader<'a> {
         if block_meta_offset > buffer_len {
             return Err(SegmentError::BadOffset {
                 offset: block_meta_offset,
+                limit: buffer_len,
+            });
+        }
+        if stored_fields_offset > buffer_len {
+            return Err(SegmentError::BadOffset {
+                offset: stored_fields_offset,
                 limit: buffer_len,
             });
         }
@@ -1124,15 +1154,19 @@ mod tests {
 
     #[test]
     fn test_block_metadata_reader_truncated_buffer_is_graceful() {
-        // The declared section extends past the end of the buffer (a truncated segment). The reader
-        // must surface a structured error at read time, never panic.
+        // The declared section extends past the end of the buffer (a truncated segment). Construction
+        // now rejects that immediately instead of deferring the failure to the first entry read.
         let buffer = vec![0_u8; 85];
         // Section [80, 92) claims one 12-byte entry, but the buffer only holds 85 bytes.
-        let reader = BlockMetadataReader::new(&buffer, 80, 92).expect("construction is permissive");
-        assert_eq!(reader.len(), 1);
         assert!(
-            matches!(reader.entry(0), Err(SegmentError::Truncated { .. })),
-            "reading past the buffer end must yield Truncated, not a panic"
+            matches!(
+                BlockMetadataReader::new(&buffer, 80, 92),
+                Err(SegmentError::BadOffset {
+                    offset: 92,
+                    limit: 85
+                })
+            ),
+            "constructor must reject a block-meta section whose end exceeds the buffer"
         );
     }
 
@@ -1147,6 +1181,47 @@ mod tests {
             ),
             "an out-of-range section offset must be rejected, not panic"
         );
+    }
+
+    #[test]
+    fn public_reader_constructors_reject_section_end_past_buffer() {
+        let buffer = vec![0_u8; 100];
+
+        assert!(matches!(
+            FieldTableReader::new(&buffer, 80, 101),
+            Err(SegmentError::BadOffset {
+                offset: 101,
+                limit: 100
+            })
+        ));
+        assert!(matches!(
+            LexiconReader::new(&buffer, 80, 101),
+            Err(SegmentError::BadOffset {
+                offset: 101,
+                limit: 100
+            })
+        ));
+        assert!(matches!(
+            PostingsTableReader::new(&buffer, 80, 101),
+            Err(SegmentError::BadOffset {
+                offset: 101,
+                limit: 100
+            })
+        ));
+        assert!(matches!(
+            PostingsDataReader::new(&buffer, 80, 101),
+            Err(SegmentError::BadOffset {
+                offset: 101,
+                limit: 100
+            })
+        ));
+        assert!(matches!(
+            BlockMetadataReader::new(&buffer, 80, 101),
+            Err(SegmentError::BadOffset {
+                offset: 101,
+                limit: 100
+            })
+        ));
     }
 
     #[test]
@@ -1310,15 +1385,16 @@ mod tests {
 
     #[test]
     fn test_bounds_enforcement_truncated() {
-        // Truncated buffer returns Truncated, not panic
+        // Truncated section bounds are rejected at construction time.
         let buffer = vec![0_u8; 85]; // Header (80) + 5 bytes of field data
         let result = FieldTableReader::new(&buffer, 80, 100);
-
-        // Reader creation should succeed (we can't read count yet)
-        let reader = result.expect("reader should be created");
-        // But trying to access an entry in a partially-written section should fail
-        let entry_result = reader.entry(0);
-        assert!(matches!(entry_result, Err(SegmentError::BadOffset { .. })));
+        assert!(matches!(
+            result,
+            Err(SegmentError::BadOffset {
+                offset: 100,
+                limit: 85
+            })
+        ));
     }
 
     #[test]
@@ -1461,11 +1537,11 @@ mod tests {
         lex_data.extend_from_slice(&(u64::MAX - 10).to_le_bytes()); // term_offset
         lex_data.extend_from_slice(&u32::MAX.to_le_bytes()); // term_len = u32::MAX
         lex_data.extend_from_slice(&7_u32.to_le_bytes()); // postings_table_index
-        // No term bytes (will be out of bounds anyway)
+        lex_data.extend_from_slice(&[0_u8; 64]); // keep the declared section in-bounds
 
         let buffer = make_test_segment(vec![], lex_data, vec![], vec![]);
         let lexicon_offset = 80_u64;
-        let postings_table_offset = 80_u64 + 4 + 16 + 10;
+        let postings_table_offset = buffer.len() as u64;
 
         let reader = LexiconReader::new(&buffer, lexicon_offset, postings_table_offset)
             .expect("should create reader");
