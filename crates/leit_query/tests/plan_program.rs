@@ -303,10 +303,11 @@ fn multiple_default_fields_expand_terms() {
 }
 
 #[test]
-fn shared_diamond_dag_plans_quickly() {
+fn shared_diamond_dag_stops_at_node_budget() {
     // 40 levels of a two-child diamond sharing one child: exponential without
-    // memoized depth traversal. Must finish fast; lowering duplicates shared
-    // subtrees, so the node budget trips before any blowup.
+    // memoized depth traversal. Lowering duplicates shared subtrees, so the
+    // node budget must trip exactly at the limit rather than after any blowup,
+    // and the whole thing must stay well inside a generous wall-clock bound.
     let mut builder = QueryBuilder::new();
     let mut current = builder.term("rust");
     for _ in 0..40 {
@@ -314,18 +315,26 @@ fn shared_diamond_dag_plans_quickly() {
     }
     let program = builder.build().expect("build diamond program");
 
-    let planner = Planner::new().with_max_depth(64);
+    let max_nodes = 256;
+    let planner = Planner::new().with_max_depth(64).with_max_nodes(max_nodes);
     let dictionary = TestDictionary;
     let fields = TestFieldRegistry;
     let mut scratch = PlannerScratch::new();
     let start = std::time::Instant::now();
     let result = planner.plan_program(&program, &context(&dictionary, &fields), &mut scratch);
-    assert!(
-        start.elapsed() < core::time::Duration::from_secs(5),
-        "diamond DAG planning took {:?}",
-        start.elapsed()
+    let elapsed = start.elapsed();
+    assert_eq!(
+        result,
+        Err(QueryError::MaxNodesExceeded {
+            max_nodes,
+            actual_nodes: max_nodes + 1,
+        }),
+        "lowering must stop at the node budget"
     );
-    assert!(matches!(result, Err(QueryError::MaxNodesExceeded { .. })));
+    assert!(
+        elapsed < core::time::Duration::from_secs(5),
+        "diamond DAG planning took {elapsed:?}"
+    );
 }
 
 #[test]
